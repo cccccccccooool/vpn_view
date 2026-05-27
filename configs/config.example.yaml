@@ -1,0 +1,50 @@
+server:
+  listen: "0.0.0.0:19463"
+
+auth:
+  secret: "change-this-secret"
+  token_ttl: "24h"
+
+adapter:
+  type: "stub"
+  mock_users: 0
+
+  # type: "singbox"
+  # singbox_config_path: "/etc/sing-box/config.json"
+  # config_template_path: "/etc/sing-box/config.template.json"
+  # inbound_tag: "vless-in"
+  # reload_command: "systemctl reload sing-box"
+  # clash_api: "http://127.0.0.1:9090"
+  # clash_secret: ""
+  # v2ray_api: "127.0.0.1:10085"
+  # subscription_domain: "vpn.example.com"
+  # subscription_port: 443
+  # subscription_type: "tcp"
+  # subscription_tls: true
+
+store:
+  sqlite:
+    path: "./data/vpnview.db"
+
+limits:
+  global_upload_speed: 0
+  global_download_speed: 0
+  default_user_upload_speed: 0
+  default_user_download_speed: 0
+  default_quota: 0
+  software_limit_strikes: 3
+
+subscription:
+  mode: "link"
+  domain: "vpn.example.com"
+  template_path: ""
+
+# ddns:
+#  provider: "cloudflare"
+#  domain: "vpn.example.com"
+#  zone_id: "cloudflare-zone-id"
+#  record_id: "cloudflare-record-id"
+#  api_token: "cloudflare-api-token"
+#  check_interval: "5m"
+
+poll_interval: "5s"
