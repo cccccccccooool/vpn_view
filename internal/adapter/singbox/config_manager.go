@@ -206,6 +206,8 @@ func (m *ConfigManager) writeConfigLocked() error {
 		return fmt.Errorf("sing-box config has no inbounds array")
 	}
 
+	managedInboundTags := make([]string, 0)
+
 	// 针对每一个 inbound 动态注入匹配协议的用户
 	for _, item := range inbounds {
 		inbound, ok := item.(map[string]any)
@@ -224,7 +226,13 @@ func (m *ConfigManager) writeConfigLocked() error {
 		}
 
 		// 根据协议类型构建用户数组并注入
-		inbound["users"] = m.buildUsersArrayForProtocol(protoType)
+		users := m.buildUsersArrayForProtocol(protoType)
+		inbound["users"] = users
+		if len(users) > 0 {
+			if tag, _ := inbound["tag"].(string); tag != "" {
+				managedInboundTags = append(managedInboundTags, tag)
+			}
+		}
 	}
 
 	// 🏆 动态注入所有用户到 experimental.v2ray_api.stats.users 列表中，生成 V2Ray 流量计数器
@@ -237,6 +245,7 @@ func (m *ConfigManager) writeConfigLocked() error {
 	stats := ensureMap(ensureMap(ensureMap(root, "experimental"), "v2ray_api"), "stats")
 	stats["enabled"] = true
 	stats["users"] = userIDs
+	m.injectUserRouteMarkers(root, managedInboundTags, userIDs)
 
 	if err := os.MkdirAll(filepath.Dir(m.cfg.ConfigPath), 0755); err != nil {
 		return err
@@ -300,6 +309,129 @@ func (m *ConfigManager) buildUsersArrayForProtocol(protocol string) []any {
 	return out
 }
 
+// injectUserRouteMarkers routes each authenticated user through an equivalent
+// direct outbound with a reversible tag, so Clash API connection chains can be
+// mapped back to the panel user even when metadata omits auth_user.
+func (m *ConfigManager) injectUserRouteMarkers(root map[string]any, inboundTags, userIDs []string) {
+	outbounds, ok := root["outbounds"].([]any)
+	if !ok || len(userIDs) == 0 {
+		return
+	}
+
+	baseOutbound := findBaseDirectOutbound(root, outbounds)
+	if baseOutbound == nil {
+		slog.Warn("skip sing-box user route markers: no direct outbound found")
+		return
+	}
+
+	outbounds = removeManagedUserOutbounds(outbounds)
+	for _, userID := range userIDs {
+		outbound := cloneAny(baseOutbound).(map[string]any)
+		outbound["tag"] = userRouteTag(userID)
+		outbounds = append(outbounds, outbound)
+	}
+	root["outbounds"] = outbounds
+
+	route := ensureMap(root, "route")
+	rules, _ := route["rules"].([]any)
+	rules = removeManagedUserRules(rules)
+	rules = append(rules, buildManagedUserRules(inboundTags, userIDs)...)
+	route["rules"] = rules
+}
+
+func findBaseDirectOutbound(root map[string]any, outbounds []any) map[string]any {
+	if route, ok := root["route"].(map[string]any); ok {
+		if final, ok := route["final"].(string); ok && final != "" {
+			if outbound := findDirectOutboundByTag(outbounds, final); outbound != nil {
+				return outbound
+			}
+		}
+	}
+	if outbound := findDirectOutboundByTag(outbounds, "direct"); outbound != nil {
+		return outbound
+	}
+	for _, item := range outbounds {
+		outbound, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		if typ, _ := outbound["type"].(string); typ == "direct" {
+			return outbound
+		}
+	}
+	return nil
+}
+
+func findDirectOutboundByTag(outbounds []any, tag string) map[string]any {
+	for _, item := range outbounds {
+		outbound, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		if outboundTag, _ := outbound["tag"].(string); outboundTag != tag {
+			continue
+		}
+		if typ, _ := outbound["type"].(string); typ != "direct" {
+			continue
+		}
+		return outbound
+	}
+	return nil
+}
+
+func removeManagedUserOutbounds(outbounds []any) []any {
+	out := make([]any, 0, len(outbounds))
+	for _, item := range outbounds {
+		outbound, ok := item.(map[string]any)
+		if !ok {
+			out = append(out, item)
+			continue
+		}
+		tag, _ := outbound["tag"].(string)
+		if isUserRouteTag(tag) {
+			continue
+		}
+		out = append(out, item)
+	}
+	return out
+}
+
+func removeManagedUserRules(rules []any) []any {
+	out := make([]any, 0, len(rules))
+	for _, item := range rules {
+		rule, ok := item.(map[string]any)
+		if !ok {
+			out = append(out, item)
+			continue
+		}
+		outbound, _ := rule["outbound"].(string)
+		if isUserRouteTag(outbound) {
+			continue
+		}
+		out = append(out, item)
+	}
+	return out
+}
+
+func buildManagedUserRules(inboundTags, userIDs []string) []any {
+	rules := make([]any, 0, len(userIDs))
+	slices.Sort(inboundTags)
+	inboundTags = slices.Compact(inboundTags)
+	for _, userID := range userIDs {
+		rule := map[string]any{
+			"auth_user": []string{userID},
+			"outbound":  userRouteTag(userID),
+		}
+		if len(inboundTags) == 1 {
+			rule["inbound"] = inboundTags[0]
+		} else if len(inboundTags) > 1 {
+			rule["inbound"] = inboundTags
+		}
+		rules = append(rules, rule)
+	}
+	return rules
+}
+
 // firstString 从 map 中按优先级依次尝试获取第一个非空字符串值。
 func firstString(m map[string]any, keys ...string) string {
 	for _, key := range keys {
@@ -318,6 +450,25 @@ func ensureMap(parent map[string]any, key string) map[string]any {
 		parent[key] = child
 	}
 	return child
+}
+
+func cloneAny(v any) any {
+	switch typed := v.(type) {
+	case map[string]any:
+		out := make(map[string]any, len(typed))
+		for k, value := range typed {
+			out[k] = cloneAny(value)
+		}
+		return out
+	case []any:
+		out := make([]any, len(typed))
+		for i, value := range typed {
+			out[i] = cloneAny(value)
+		}
+		return out
+	default:
+		return typed
+	}
 }
 
 // cloneStringMap 对 string map 进行浅拷贝，避免外部修改影响内部状态。

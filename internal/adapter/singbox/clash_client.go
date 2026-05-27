@@ -226,6 +226,9 @@ func (c clashConnection) toPort() port.ActiveConnection {
 	if userID == "" {
 		userID = stringFromMeta(c.Metadata, "name")
 	}
+	if userID == "" {
+		userID = userIDFromChains(c.Chains)
+	}
 	// 🏆 降级方案一：通过已记录的 IP-User 面板用户映射动态反查
 	if userID == "" && sourceIP != "" {
 		userID = domain.GetUserByIP(sourceIP)
@@ -263,6 +266,15 @@ func stringFromMeta(meta map[string]any, key string) string {
 	default:
 		return ""
 	}
+}
+
+func userIDFromChains(chains []string) string {
+	for _, chain := range chains {
+		if userID := userIDFromRouteTag(chain); userID != "" {
+			return userID
+		}
+	}
+	return ""
 }
 
 // joinHostPort 将主机名和端口拼接为 host:port 格式，空值时优雅处理。
