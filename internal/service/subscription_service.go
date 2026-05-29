@@ -34,7 +34,11 @@ func NewSubscriptionService(adapter port.VPNAdapter, cfg config.SubscriptionConf
 //  3. 不支持则直接向调用端返回 domain.ErrNotSupported 错误。
 func (s *SubscriptionService) Generate(ctx context.Context, user *domain.User) ([]byte, string, error) {
 	if s.adapter.Capabilities().Has(domain.CapSubscription) {
-		return s.adapter.GenerateSubscription(ctx, user.ID, user.Credentials)
+		provider, ok := s.adapter.(port.SubscriptionProvider)
+		if !ok {
+			return nil, "", domain.ErrNotSupported
+		}
+		return provider.GenerateSubscription(ctx, user.ID, user.Credentials)
 	}
 	return nil, "", domain.ErrNotSupported
 }

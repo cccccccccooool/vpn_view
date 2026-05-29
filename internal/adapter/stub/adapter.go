@@ -16,9 +16,16 @@ import (
 	"sync"
 	"time"
 
+	"vpnview/internal/adapter/registry"
 	"vpnview/internal/domain"
 	"vpnview/internal/port"
 )
+
+func init() {
+	registry.Register("stub", func(raw map[string]any) (port.VPNAdapter, error) {
+		return New(raw), nil
+	})
+}
 
 // Adapter 基于内存的高保真 VPN 后端测试桩适配器。
 // 所有创建的用户、证书、网速控制指标等均只记录在内存 map 中，服务重启后即清空消失。

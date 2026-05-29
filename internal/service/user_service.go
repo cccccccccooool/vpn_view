@@ -94,8 +94,13 @@ func (s *UserService) CreateUser(ctx context.Context, id, name string, creds map
 
 	// 如果适配器支持硬件级别单用户限速，则设置限速值
 	if caps.Has(domain.CapSpeedLimit) && (speedUp > 0 || speedDown > 0) {
-		if err := s.adapter.SetUserSpeedLimit(ctx, id, speedUp, speedDown); err != nil {
-			slog.Warn("适配器应用单用户硬件限速失败", "id", id, "err", err)
+		limiter, ok := s.adapter.(port.SpeedLimiter)
+		if ok {
+			if err := limiter.SetUserSpeedLimit(ctx, id, speedUp, speedDown); err != nil {
+				slog.Warn("适配器应用单用户硬件限速失败", "id", id, "err", err)
+			}
+		} else {
+			slog.Warn("适配器声明支持单用户限速，但未实现限速接口", "id", id)
 		}
 	}
 	return nil
@@ -124,8 +129,12 @@ func (s *UserService) UpdateUser(ctx context.Context, id, name string, quota, sp
 
 	// 若处于启用状态且适配器支持单人限速，更新网络代理端配置
 	if user.Enabled && s.adapter.Capabilities().Has(domain.CapSpeedLimit) {
-		if err := s.adapter.SetUserSpeedLimit(ctx, id, speedUp, speedDown); err != nil {
-			slog.Warn("适配器同步更新单用户硬件限速失败", "id", id, "err", err)
+		if limiter, ok := s.adapter.(port.SpeedLimiter); ok {
+			if err := limiter.SetUserSpeedLimit(ctx, id, speedUp, speedDown); err != nil {
+				slog.Warn("适配器同步更新单用户硬件限速失败", "id", id, "err", err)
+			}
+		} else {
+			slog.Warn("适配器声明支持单用户限速，但未实现限速接口", "id", id)
 		}
 	}
 	return nil
@@ -149,7 +158,8 @@ func (s *UserService) DeleteUser(ctx context.Context, id string) error {
 // 如果要从禁用状态开启：将重新注册并加载用户及证书到 VPN 代理中（恢复连接）；
 // 如果要将其禁用：将从代理适配器中剔除或禁用该账号。
 // 🏆 即时阻断机制：如果用户被禁用，主程序会异步扫描当前所有的活动网络 TCP/UDP 连接，
-//   发现属于该禁用用户的活动连接，则执行强制 Kill 阻断，保证流量即刻关停，拒绝白嫖！
+//
+//	发现属于该禁用用户的活动连接，则执行强制 Kill 阻断，保证流量即刻关停，拒绝白嫖！
 func (s *UserService) SetEnabled(ctx context.Context, id string, enabled bool) error {
 	user, err := s.store.GetByID(ctx, id)
 	if err != nil {
@@ -163,7 +173,11 @@ func (s *UserService) SetEnabled(ctx context.Context, id string, enabled bool) e
 	if enabled {
 		// 恢复启用时：如果适配器有 EnableUser 接口则调用；否则退回到 AddUser 重新注册进代理
 		if caps.Has(domain.CapEnableUser) {
-			if err := s.adapter.EnableUser(ctx, id, user.Credentials); err != nil {
+			stateManager, ok := s.adapter.(port.UserStateManager)
+			if !ok {
+				return domain.ErrNotSupported
+			}
+			if err := stateManager.EnableUser(ctx, id, user.Credentials); err != nil {
 				return fmt.Errorf("适配器恢复启用用户失败: %w", err)
 			}
 		} else if caps.Has(domain.CapAddUser) {
@@ -175,12 +189,18 @@ func (s *UserService) SetEnabled(ctx context.Context, id string, enabled bool) e
 		}
 		// 恢复原有的速率限速指标
 		if caps.Has(domain.CapSpeedLimit) {
-			_ = s.adapter.SetUserSpeedLimit(ctx, id, user.SpeedLimitUp, user.SpeedLimitDown)
+			if limiter, ok := s.adapter.(port.SpeedLimiter); ok {
+				_ = limiter.SetUserSpeedLimit(ctx, id, user.SpeedLimitUp, user.SpeedLimitDown)
+			}
 		}
 	} else {
 		// 临时禁用时：优先调用适配器自带的禁用接口，无则降级从配置中 Remove 删除该账号
 		if caps.Has(domain.CapDisableUser) {
-			if err := s.adapter.DisableUser(ctx, id); err != nil {
+			stateManager, ok := s.adapter.(port.UserStateManager)
+			if !ok {
+				return domain.ErrNotSupported
+			}
+			if err := stateManager.DisableUser(ctx, id); err != nil {
 				return fmt.Errorf("适配器禁用用户失败: %w", err)
 			}
 		} else if caps.Has(domain.CapRemoveUser) {
@@ -193,27 +213,30 @@ func (s *UserService) SetEnabled(ctx context.Context, id string, enabled bool) e
 
 		// 🏆【核心即时阻断】强行切断当前该禁用用户正在进行的全部活动网络 TCP/UDP 连接，达到即刻停网效果
 		if caps.Has(domain.CapActiveConns) && caps.Has(domain.CapKillConn) {
-			go func() {
-				// 异步进行，延迟 100ms 避开底层操作的配置重载瞬时锁定
-				time.Sleep(100 * time.Millisecond)
-				conns, err := s.adapter.GetActiveConnections(context.Background())
-				if err != nil {
-					slog.Warn("踢除用户失败：无法从适配器获取活跃连接列表", "err", err)
-					return
-				}
-				killedCount := 0
-				for _, conn := range conns {
-					if conn.UserID == id {
-						// 只要属于此禁用用户的网络连接，执行物理阻断
-						if err := s.adapter.KillConnection(context.Background(), conn.ID); err == nil {
-							killedCount++
+			connProvider, ok := s.adapter.(port.ConnectionProvider)
+			if ok {
+				go func() {
+					// 异步进行，延迟 100ms 避开底层操作的配置重载瞬时锁定
+					time.Sleep(100 * time.Millisecond)
+					conns, err := connProvider.GetActiveConnections(context.Background())
+					if err != nil {
+						slog.Warn("踢除用户失败：无法从适配器获取活跃连接列表", "err", err)
+						return
+					}
+					killedCount := 0
+					for _, conn := range conns {
+						if conn.UserID == id {
+							// 只要属于此禁用用户的网络连接，执行物理阻断
+							if err := connProvider.KillConnection(context.Background(), conn.ID); err == nil {
+								killedCount++
+							}
 						}
 					}
-				}
-				if killedCount > 0 {
-					slog.Info("已成功强制阻断禁用用户的全部网络活动连接", "user_id", id, "阻断连接数", killedCount)
-				}
-			}()
+					if killedCount > 0 {
+						slog.Info("已成功强制阻断禁用用户的全部网络活动连接", "user_id", id, "阻断连接数", killedCount)
+					}
+				}()
+			}
 		}
 	}
 

@@ -11,7 +11,6 @@ package main
 import (
 	"context"
 	"flag"
-	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -22,9 +21,10 @@ import (
 	"time"
 
 	"vpnview/internal/adapter/ddns/cloudflare"
-	"vpnview/internal/adapter/singbox"
+	"vpnview/internal/adapter/registry"
+	_ "vpnview/internal/adapter/singbox"
 	"vpnview/internal/adapter/store/sqlite"
-	"vpnview/internal/adapter/stub"
+	_ "vpnview/internal/adapter/stub"
 	"vpnview/internal/auth"
 	"vpnview/internal/config"
 	"vpnview/internal/handler"
@@ -83,7 +83,6 @@ func main() {
 	blocker := auth.NewIPBlocker() // 初始化 IP 防暴力破解拦截中心
 	userSvc := service.NewUserService(store, adapter, cfg.Limits)
 
-	// 🏆 核心逻辑：启动自愈同步机制
 	// 读取 SQLite 数据库中所有标记为 Enabled 的用户，并调用 adapter.AddUser 重新写入适配器中
 	// 这避免了因代理软件重启、配置丢失导致的用户连接失效
 	slog.Info("正在启动自愈同步：将数据库用户同步至 VPN 适配器配置...")
@@ -102,7 +101,7 @@ func main() {
 				}
 			}
 		}
-		slog.Info("自愈同步完成", "已恢复的有效用户数", syncCount)
+		slog.Info("成功", "已恢复的有效用户数", syncCount)
 	}
 
 	// 5. 实例化各个关键业务服务
@@ -120,7 +119,7 @@ func main() {
 	go trafficSvc.Start(ctx)   // 启动流量定时轮询和瞬时网速计算
 	go lifecycleSvc.Start(ctx) // 启动账号到期或超额自动停机监控
 	if ddnsSvc != nil {
-		go ddnsSvc.Start(ctx)  // 若启用，启动动态公网 IP 解析定时同步
+		go ddnsSvc.Start(ctx) // 若启用，启动动态公网 IP 解析定时同步
 	}
 
 	// 7. 装配 HTTP 服务路由并配置安全参数
@@ -171,17 +170,7 @@ func buildStore(cfg *config.Config) (port.UserStore, error) {
 
 // buildAdapter 根据配置字典中的类型，实例化具体的底层 VPN 核心适配器（Stub 或 Sing-box）。
 func buildAdapter(raw map[string]any) (port.VPNAdapter, error) {
-	adapterType := strings.ToLower(fmt.Sprint(raw["type"]))
-	switch adapterType {
-	case "", "stub":
-		// 返回基于内存的测试桩适配器（便于无 VPN 环境调试）
-		return stub.New(raw), nil
-	case "singbox", "sing-box":
-		// 返回真实的 Sing-box 网络代理适配器
-		return singbox.New(raw)
-	default:
-		return nil, fmt.Errorf("未知的 VPN 适配器类型 %q", adapterType)
-	}
+	return registry.Create(raw)
 }
 
 // buildDDNSService 解析动态 DNS (DDNS) 参数，构建定时域名解析服务。

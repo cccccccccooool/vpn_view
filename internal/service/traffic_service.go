@@ -21,9 +21,9 @@ import (
 
 // TrafficService 控制系统核心流量数据轮询、数据累加持久化与瞬时网速计算。
 type TrafficService struct {
-	store    port.UserStore   // 本地 SQLite 存储句柄
-	adapter  port.VPNAdapter  // VPN 内核适配器
-	interval time.Duration    // 流量拉取定时轮询间隔
+	store    port.UserStore  // 本地 SQLite 存储句柄
+	adapter  port.VPNAdapter // VPN 内核适配器
+	interval time.Duration   // 流量拉取定时轮询间隔
 
 	mu            sync.RWMutex
 	speeds        map[string][2]int64 // 各用户当前实时的上传与下载网速 [uploadSpeed, downloadSpeed]（字节/秒）
@@ -52,6 +52,10 @@ func (s *TrafficService) Start(ctx context.Context) {
 		slog.Info("VPN 适配器不支持流量数据查询，流量定时轮询监控已关闭")
 		return
 	}
+	if _, ok := s.adapter.(port.TrafficProvider); !ok {
+		slog.Warn("VPN 适配器声明支持流量查询，但未实现流量接口，流量定时轮询监控已关闭")
+		return
+	}
 
 	// 启动时优先主动执行一次拉取，铺垫基础基准数据
 	s.pollTraffic(ctx)
@@ -71,6 +75,9 @@ func (s *TrafficService) Start(ctx context.Context) {
 // PollOnce 用于强行执行一次流量抓取更新，通常在删除用户或者重大停机节点被调用以确保流量不缺失。
 func (s *TrafficService) PollOnce(ctx context.Context) {
 	if !s.adapter.Capabilities().Has(domain.CapQueryTraffic) {
+		return
+	}
+	if _, ok := s.adapter.(port.TrafficProvider); !ok {
 		return
 	}
 	s.pollTraffic(ctx)
@@ -117,8 +124,8 @@ func (s *TrafficService) GetGlobalStats(ctx context.Context) (Stats, error) {
 	s.mu.RUnlock()
 
 	// 全局瞬时速度获取策略
-	if s.adapter.Capabilities().Has(domain.CapRealtimeSpeed) {
-		speed, err := s.adapter.GetGlobalSpeed(ctx)
+	if speedProvider, ok := s.adapter.(port.GlobalSpeedProvider); s.adapter.Capabilities().Has(domain.CapRealtimeSpeed) && ok {
+		speed, err := speedProvider.GetGlobalSpeed(ctx)
 		if err == nil && speed != nil {
 			stats.SpeedUp = speed.Up
 			stats.SpeedDown = speed.Down
@@ -134,8 +141,8 @@ func (s *TrafficService) GetGlobalStats(ctx context.Context) (Stats, error) {
 	}
 
 	// 统计活跃连接数
-	if s.adapter.Capabilities().Has(domain.CapActiveConns) {
-		if conns, err := s.adapter.GetActiveConnections(ctx); err == nil {
+	if connProvider, ok := s.adapter.(port.ConnectionProvider); s.adapter.Capabilities().Has(domain.CapActiveConns) && ok {
+		if conns, err := connProvider.GetActiveConnections(ctx); err == nil {
 			stats.ActiveConnections = len(conns)
 		}
 	}
@@ -148,7 +155,11 @@ func (s *TrafficService) GetActiveConnections(ctx context.Context) ([]port.Activ
 	if !s.adapter.Capabilities().Has(domain.CapActiveConns) {
 		return nil, domain.ErrNotSupported
 	}
-	conns, err := s.adapter.GetActiveConnections(ctx)
+	connProvider, ok := s.adapter.(port.ConnectionProvider)
+	if !ok {
+		return nil, domain.ErrNotSupported
+	}
+	conns, err := connProvider.GetActiveConnections(ctx)
 	if err != nil {
 		slog.Warn("从适配器拉取活动网络连接失败，返回空列表", "err", err)
 		return []port.ActiveConnection{}, nil
@@ -161,7 +172,11 @@ func (s *TrafficService) KillConnection(ctx context.Context, connID string) erro
 	if !s.adapter.Capabilities().Has(domain.CapKillConn) {
 		return domain.ErrNotSupported
 	}
-	return s.adapter.KillConnection(ctx, connID)
+	connProvider, ok := s.adapter.(port.ConnectionProvider)
+	if !ok {
+		return domain.ErrNotSupported
+	}
+	return connProvider.KillConnection(ctx, connID)
 }
 
 // pollTraffic 底层流量轮询与核心数据差值运算算法函数。
@@ -173,7 +188,11 @@ func (s *TrafficService) KillConnection(ctx context.Context, connID string) erro
 //  5. 将计算出的增量流量（deltaUp/deltaDown）即刻异步调用 `store.AddTraffic` 累加落库 SQLite，保证数据库流量数据的真实准确。
 //  6. 依据两次定时轮询的时间跨度（Seconds）计算得出各用户的实时网速（上传与下载），累加求出全局速度指标。
 func (s *TrafficService) pollTraffic(ctx context.Context) {
-	snaps, err := s.adapter.QueryTraffic(ctx)
+	trafficProvider, ok := s.adapter.(port.TrafficProvider)
+	if !ok {
+		return
+	}
+	snaps, err := trafficProvider.QueryTraffic(ctx)
 	if err != nil {
 		s.mu.Lock()
 		s.lastPollError = err

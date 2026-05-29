@@ -140,7 +140,10 @@ func (s *LifecycleService) logGlobalSoftwareLimit(speeds map[string][2]int64) {
 func (s *LifecycleService) disableUser(ctx context.Context, user *domain.User, reason error) {
 	caps := s.adapter.Capabilities()
 	if caps.Has(domain.CapDisableUser) {
-		if err := s.adapter.DisableUser(ctx, user.ID); err != nil {
+		stateManager, ok := s.adapter.(port.UserStateManager)
+		if !ok {
+			slog.Warn("适配器声明支持禁用用户，但未实现启停接口", "id", user.ID)
+		} else if err := stateManager.DisableUser(ctx, user.ID); err != nil {
 			slog.Warn("生命周期调用适配器禁用用户接口失败", "id", user.ID, "err", err)
 		}
 	} else if caps.Has(domain.CapRemoveUser) {

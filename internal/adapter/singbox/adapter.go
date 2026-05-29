@@ -18,9 +18,19 @@ import (
 	"sync"
 	"time"
 
+	"vpnview/internal/adapter/registry"
 	"vpnview/internal/domain"
 	"vpnview/internal/port"
 )
+
+func init() {
+	registry.Register("singbox", func(raw map[string]any) (port.VPNAdapter, error) {
+		return New(raw)
+	})
+	registry.Register("sing-box", func(raw map[string]any) (port.VPNAdapter, error) {
+		return New(raw)
+	})
+}
 
 // Adapter 是 Sing-box 后端的顶级适配层主控类，高度统筹子功能组件的调度运作。
 type Adapter struct {
@@ -42,10 +52,10 @@ type TrafficReader interface {
 
 // New 根据原始参数字典创建、加载并初始化一个 Sing-box 顶级适配器实例。
 // 启动逻辑：
-//  - 转换并加载 Config 运行参数。
-//  - 实例化 ConfigManager，自动核算冷启动，建立底座 users 并同步 stats 激活指标。
-//  - 若启用了 ClashAPI，实例化 Clash API 专用客户端。
-//  - 若启用了 V2RayAPI，直连初始化 gRPC 流量抓取读取驱动。
+//   - 转换并加载 Config 运行参数。
+//   - 实例化 ConfigManager，自动核算冷启动，建立底座 users 并同步 stats 激活指标。
+//   - 若启用了 ClashAPI，实例化 Clash API 专用客户端。
+//   - 若启用了 V2RayAPI，直连初始化 gRPC 流量抓取读取驱动。
 func New(raw map[string]any) (*Adapter, error) {
 	cfg := ParseConfig(raw)
 	manager, err := NewConfigManager(cfg)
@@ -78,10 +88,11 @@ func New(raw map[string]any) (*Adapter, error) {
 
 // Capabilities 🏆 核心动态降级分发器。
 // 根据配置文件中各项接口的可连接状态与可用性，动态组合、生成位掩码。
-//  - 账号管理生命周期（查询、添加、移除、禁用、启用）：Sing-box 原生支持通过 Manager 修改 JSON 配置，默认支持。
-//  - 活跃连接与切断连接、全局速度：在 Clash 兼容接口激活时开启。
-//  - 流量数据与网速度量：在 gRPC 统计接口直连成功时开启。
-//  - 订阅链接下发：在 Subscription 域名配置有效时开启。
+//   - 账号管理生命周期（查询、添加、移除、禁用、启用）：Sing-box 原生支持通过 Manager 修改 JSON 配置，默认支持。
+//   - 活跃连接与切断连接、全局速度：在 Clash 兼容接口激活时开启。
+//   - 流量数据与网速度量：在 gRPC 统计接口直连成功时开启。
+//   - 订阅链接下发：在 Subscription 域名配置有效时开启。
+//
 // 这极大地避免了后台接口崩溃导致前台页面整体卡死的尴尬。
 func (a *Adapter) Capabilities() domain.Capability {
 	// 本地 JSON 可写，即可支持基本的账号生命周期和前端动态表单

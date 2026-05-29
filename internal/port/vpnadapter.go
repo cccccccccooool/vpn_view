@@ -61,8 +61,8 @@ type ProfileProvider interface {
 	Profile() domain.AdapterProfile
 }
 
-// VPNAdapter 定义了主程序与底层 VPN 网络代理内核进行数据交互和控制管理的标准统一核心接口。
-// 所有的 VPN 客户端内核（如 Sing-box 客户端，Xray 客户端，测试 mock 桩等）必须完整实现该接口。
+// VPNAdapter 定义主程序不可降级的最小 VPN 模块接口。
+// 只有账号同步和基础能力声明保留在核心接口；流量、连接、订阅、限速等功能通过下方可选接口按能力启用。
 type VPNAdapter interface {
 	// Capabilities 返回当前适配器所支持的能力位掩码集（如是否支持速度限制、活跃连接监控等）。
 	Capabilities() domain.Capability
@@ -79,33 +79,54 @@ type VPNAdapter interface {
 	// RemoveUser 从底层代理彻底移除某用户，防止其连接，并清理对应的全部配置资源。
 	RemoveUser(ctx context.Context, userID string) error
 
+	// Close 安全关闭与底层网络代理的数据通信或 API 长连接，归还系统资源。
+	Close() error
+}
+
+// UserStateManager 表示适配器支持保留用户主体的启停控制。
+type UserStateManager interface {
 	// DisableUser 禁用指定用户账户，使其无法建立新的连接，但在配置中依旧保留用户主体。
 	DisableUser(ctx context.Context, userID string) error
 
 	// EnableUser 重新启用此前被禁用的用户，通常在用户续费重置时调用，并同步传入其最新的连接凭据。
 	EnableUser(ctx context.Context, userID string, credentials map[string]string) error
+}
 
+// TrafficProvider 表示适配器能够提供用户级累计流量快照。
+type TrafficProvider interface {
 	// QueryTraffic 核心轮询接口。查询所有用户的累计流量快照。主程序通过定时器前后两次调用的差值算得实时速度。
 	QueryTraffic(ctx context.Context) ([]TrafficSnapshot, error)
+}
 
+// GlobalSpeedProvider 表示适配器能够提供底层原生全局实时速度。
+type GlobalSpeedProvider interface {
 	// GetGlobalSpeed 获取整个代理服务器的全局瞬时实时吞吐上传与下载速度。
 	GetGlobalSpeed(ctx context.Context) (*GlobalSpeed, error)
+}
 
+// ConnectionProvider 表示适配器能够列出并切断底层活跃连接。
+type ConnectionProvider interface {
 	// GetActiveConnections 抓取当前所有维持中的活跃连接记录列表。
 	GetActiveConnections(ctx context.Context) ([]ActiveConnection, error)
 
 	// KillConnection 强制切断某一个具体 ID 的活动网络连接。
 	KillConnection(ctx context.Context, connID string) error
+}
 
+// SpeedLimiter 表示适配器支持单用户原生限速。
+type SpeedLimiter interface {
 	// SetUserSpeedLimit 对单个 VPN 用户实施最大上传与下载的网速上限控制（字节/秒）。如果不被底层支持，返回 ErrNotSupported。
 	SetUserSpeedLimit(ctx context.Context, userID string, uploadBytesPerSec, downloadBytesPerSec int64) error
+}
 
+// GlobalSpeedLimiter 表示适配器支持全局原生限速。
+type GlobalSpeedLimiter interface {
 	// SetGlobalSpeedLimit 对代理服务器整机实施最大全局上传和下载吞吐网速控制（字节/秒）。如果不被支持，返回 ErrNotSupported。
 	SetGlobalSpeedLimit(ctx context.Context, uploadBytesPerSec, downloadBytesPerSec int64) error
+}
 
+// SubscriptionProvider 表示适配器能够生成用户客户端订阅配置。
+type SubscriptionProvider interface {
 	// GenerateSubscription 为用户量身定制地生成其可直接接入的客户端订阅链接配置文件文本内容及 MIME-Type 类型。
 	GenerateSubscription(ctx context.Context, userID string, credentials map[string]string) ([]byte, string, error)
-
-	// Close 安全关闭与底层网络代理的数据通信或 API 长连接，归还系统资源。
-	Close() error
 }
