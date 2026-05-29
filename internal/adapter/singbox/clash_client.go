@@ -1,5 +1,15 @@
-// clash_client.go 封装了 Clash RESTful API 的 HTTP 客户端，
-// 提供实时速率查询、活跃连接管理、配置重载和流量聚合等功能。
+// ============================================================================
+// 文件说明：internal/adapter/singbox/clash_client.go
+// 职责概览：实现连接并通信 Sing-box 内置 Clash API 兼容服务的 HTTP 客户端（ClashClient）。
+//           提供利用 Clash /traffic 实时吞吐推送流（SSE）读取全局瞬时速度的方法。
+//           提供从 `/connections` 活动长连接端点，拉取当前服务器所有活跃 TCP/UDP 网络连接明细、
+//           以及向指定 ID 发起 DELETE 剔除网络连接的方法。
+//           降级兜底算法（QueryTrafficFromConnections）：
+//           当 gRPC 流量统计组件完全未配置或端口挂掉时，此组件可作为坚实的降级方案。
+//           它会拉取 /connections，结合 identity.Resolver 模块，反向汇总还原出所有用户的
+//           实时累计流量数据，保障流量落库和超额停机功能的健壮运行。
+// ============================================================================
+
 package singbox
 
 import (
@@ -16,19 +26,18 @@ import (
 	"time"
 
 	"vpnview/internal/domain"
+	"vpnview/internal/identity"
 	"vpnview/internal/port"
 )
 
-// ClashClient 是 Clash RESTful API 的 HTTP 客户端。
-// 用于与 sing-box 内置的 Clash 兼容 API 进行交互。
+// ClashClient 负责调度 Sing-box 内置的 Clash 兼容 API 终点进行全局状态度量。
 type ClashClient struct {
-	baseURL string       // Clash API 基础地址，例如 http://127.0.0.1:9090
-	secret  string       // API 鉴权密钥（Bearer Token）
-	client  *http.Client // 底层 HTTP 客户端
+	baseURL string       // API 控制根入口（如 http://127.0.0.1:9090）
+	secret  string       // Bearer Token 访问凭证
+	client  *http.Client // 带超时控制的 HTTP 发起端
 }
 
-// NewClashClient 创建一个新的 ClashClient 实例。
-// baseURL 为 Clash API 地址，secret 为鉴权密钥（可为空）。
+// NewClashClient 实例化创建一个 ClashClient。
 func NewClashClient(baseURL, secret string) *ClashClient {
 	return &ClashClient{
 		baseURL: strings.TrimRight(baseURL, "/"),
@@ -39,7 +48,8 @@ func NewClashClient(baseURL, secret string) *ClashClient {
 	}
 }
 
-// GetTraffic 获取全局实时上传和下载速率 (来自 clash API /traffic)
+// GetTraffic 获取全局实时的上传和下载速率。
+// 利用 Clash 的 SSE (Server-Sent Events) 单向推送流，读取第一条推送数据即算得当秒速率。
 func (c *ClashClient) GetTraffic(ctx context.Context) (*port.GlobalSpeed, error) {
 	req, err := c.newRequest(ctx, http.MethodGet, "/traffic", nil)
 	if err != nil {
@@ -55,8 +65,7 @@ func (c *ClashClient) GetTraffic(ctx context.Context) (*port.GlobalSpeed, error)
 	}
 
 	scanner := bufio.NewScanner(resp.Body)
-	// /traffic 接口是一个 SSE (Server-Sent Events) 流或者分块 JSON 流
-	// 我们只需要读取第一条数据即可代表当前这一秒的实时速率
+	// 读取流首行，代表一秒内的速率指标
 	if scanner.Scan() {
 		var item struct {
 			Up   int64 `json:"up"`
@@ -73,7 +82,7 @@ func (c *ClashClient) GetTraffic(ctx context.Context) (*port.GlobalSpeed, error)
 	return &port.GlobalSpeed{}, nil
 }
 
-// GetConnections 获取当前所有活跃连接列表（来自 Clash API GET /connections）。
+// GetConnections 获取当前正在运行的全部活跃连接记录，调用 Clash 接口 `GET /connections`。
 func (c *ClashClient) GetConnections(ctx context.Context) ([]port.ActiveConnection, error) {
 	req, err := c.newRequest(ctx, http.MethodGet, "/connections", nil)
 	if err != nil {
@@ -102,7 +111,7 @@ func (c *ClashClient) GetConnections(ctx context.Context) ([]port.ActiveConnecti
 	return out, nil
 }
 
-// KillConnection 通过 ID 切断一个已建立的活跃连接 (来自 clash API DELETE /connections/{id})
+// KillConnection 阻断切断指定的网络连接。调用 `DELETE /connections/{id}`。
 func (c *ClashClient) KillConnection(ctx context.Context, connID string) error {
 	req, err := c.newRequest(ctx, http.MethodDelete, "/connections/"+url.PathEscape(connID), nil)
 	if err != nil {
@@ -119,7 +128,7 @@ func (c *ClashClient) KillConnection(ctx context.Context, connID string) error {
 	return nil
 }
 
-// ReloadConfig 调用 clash API 重载底层 sing-box 配置文件
+// ReloadConfig 热更新重载底层代理配置文件。调用 `PUT /configs?force=true`。
 func (c *ClashClient) ReloadConfig(ctx context.Context, path string) error {
 	body, err := json.Marshal(map[string]string{"path": path})
 	if err != nil {
@@ -141,7 +150,7 @@ func (c *ClashClient) ReloadConfig(ctx context.Context, path string) error {
 	return nil
 }
 
-// newRequest 创建一个带 context 和鉴权 header 的 HTTP 请求。
+// newRequest 创建一个注入 Bearer Token 鉴权的 HTTP 请求包。
 func (c *ClashClient) newRequest(ctx context.Context, method, path string, body io.Reader) (*http.Request, error) {
 	req, err := http.NewRequestWithContext(ctx, method, c.baseURL+path, body)
 	if err != nil {
@@ -153,13 +162,12 @@ func (c *ClashClient) newRequest(ctx context.Context, method, path string, body 
 	return req, nil
 }
 
-// statusError 从非 2xx 响应中提取错误信息，返回格式化的错误。
 func (c *ClashClient) statusError(resp *http.Response) error {
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-	return fmt.Errorf("clash api returned %s: %s", resp.Status, strings.TrimSpace(string(body)))
+	return fmt.Errorf("Clash API 响应异常: %s, 详情: %s", resp.Status, strings.TrimSpace(string(body)))
 }
 
-// clashConnection 是 Clash API /connections 端点返回的单个连接的 JSON 结构映射。
+// clashConnection 映射自 Clash `/connections` 返回的单个网络连接的 JSON 对象。
 type clashConnection struct {
 	ID          string         `json:"id"`
 	Upload      int64          `json:"upload"`
@@ -171,9 +179,12 @@ type clashConnection struct {
 	RulePayload string         `json:"rulePayload"`
 }
 
-// QueryTrafficFromConnections 通过聚合 /connections 端点的所有连接数据，
-// 按用户汇总流量快照。这是当 V2Ray Stats gRPC API 不可用时的降级备选方案。
-// 注意：这些是累积值（非增量），调用方需要自行计算差值。
+// QueryTrafficFromConnections 🏆 流量统计降级算法。
+// 流程：
+//  1. 通过 /connections 获取所有活动连接及其实时消耗的总流量值（Upload/Download）。
+//  2. 遍历连接，通过 toPort 转换机制，抓取 identity.Resolver 并将 IP、标签等解构翻译出用户 ID。
+//  3. 过滤掉无法确定归宿的临时连接（防止垃圾连接污染数据库）。
+//  4. 将属于同一个用户的所有连接的累计流量在内存中求和，重构汇总为 TrafficSnapshot 快照列表返回。
 func (c *ClashClient) QueryTrafficFromConnections(ctx context.Context) ([]port.TrafficSnapshot, error) {
 	conns, err := c.GetConnections(ctx)
 	if err != nil {
@@ -184,7 +195,7 @@ func (c *ClashClient) QueryTrafficFromConnections(ctx context.Context) ([]port.T
 	for _, conn := range conns {
 		uid := conn.UserID
 		if uid == "" || strings.HasPrefix(uid, "IP:") {
-			continue // 跳过无法识别或仅以 IP 标记的临时用户，防止污染流量记录数据库
+			continue // 丢弃无法确定归档的匿名/IP 临时绑定连接，防污染流量落库
 		}
 		snap := byUser[uid]
 		if snap == nil {
@@ -202,7 +213,11 @@ func (c *ClashClient) QueryTrafficFromConnections(ctx context.Context) ([]port.T
 	return out, nil
 }
 
-// toPort 将 Clash API 的连接结构转换为 port.ActiveConnection 通用模型。
+// toPort 将 Clash API 连接结构高聚集成标准的 port.ActiveConnection 数据模型。
+// 核心 identity 调度链：
+//  1. 抓取连接元数据，收集 identity.Hint 线索（来自元数据、分流链、来路 IP）。
+//  2. 提交给 `singboxIdentityResolver()` 按照优先级（InboundUser -> RouteTag 路由翻译 -> IP 反查映射）识别。
+//  3. 解出 UserID，如无法解出，采用 `IP:192.168...` 作为标识提示，确保长连接管控无遗漏。
 func (c clashConnection) toPort() port.ActiveConnection {
 	sourceIP := stringFromMeta(c.Metadata, "sourceIP")
 	network := stringFromMeta(c.Metadata, "network")
@@ -213,27 +228,10 @@ func (c clashConnection) toPort() port.ActiveConnection {
 	}
 	destination := joinHostPort(host, stringFromMeta(c.Metadata, "destinationPort"))
 
-	slog.Debug("clash connection metadata", "connID", c.ID, "metadata", c.Metadata)
+	slog.Debug("Clash 活动连接元数据", "connID", c.ID, "metadata", c.Metadata)
 
-	// sing-box Clash API 使用 metadata.auth_user 来标识认证用户
-	userID := stringFromMeta(c.Metadata, "inbound_user")
-	if userID == "" {
-		userID = stringFromMeta(c.Metadata, "auth_user")
-	}
-	if userID == "" {
-		userID = stringFromMeta(c.Metadata, "user")
-	}
-	if userID == "" {
-		userID = stringFromMeta(c.Metadata, "name")
-	}
-	if userID == "" {
-		userID = userIDFromChains(c.Chains)
-	}
-	// 🏆 降级方案一：通过已记录的 IP-User 面板用户映射动态反查
-	if userID == "" && sourceIP != "" {
-		userID = domain.GetUserByIP(sourceIP)
-	}
-	// 🏆 降级方案二：若仍完全无法匹配，则通过 IP 分组，使大盘能够按 IP 进行物理隔离展示
+	// 🏆 呼叫身份解析器
+	userID := singboxIdentityResolver().Resolve(c.identityHints(sourceIP))
 	if userID == "" && sourceIP != "" {
 		userID = "IP:" + sourceIP
 	}
@@ -250,8 +248,6 @@ func (c clashConnection) toPort() port.ActiveConnection {
 	}
 }
 
-// stringFromMeta 从 metadata map 中安全提取指定 key 的字符串值。
-// 支持 string、float64、int 类型的自动转换。
 func stringFromMeta(meta map[string]any, key string) string {
 	if meta == nil {
 		return ""
@@ -268,16 +264,57 @@ func stringFromMeta(meta map[string]any, key string) string {
 	}
 }
 
-func userIDFromChains(chains []string) string {
-	for _, chain := range chains {
-		if userID := userIDFromRouteTag(chain); userID != "" {
-			return userID
+// identityHints 将连接的多维信息，平铺搜集为身份识别 Hint 线索集。
+func (c clashConnection) identityHints(sourceIP string) []identity.Hint {
+	hints := make([]identity.Hint, 0, len(c.Metadata)+len(c.Chains)+1)
+	for key, value := range c.Metadata {
+		if s := metaValueString(value); s != "" {
+			hints = append(hints, identity.Hint{
+				Source: identity.HintMetadata,
+				Key:    key,
+				Value:  s,
+			})
 		}
 	}
-	return ""
+	for _, chain := range c.Chains {
+		hints = append(hints, identity.Hint{
+			Source: identity.HintChain,
+			Value:  chain,
+		})
+	}
+	if sourceIP != "" {
+		hints = append(hints, identity.Hint{
+			Source: identity.HintIP,
+			Value:  sourceIP,
+		})
+	}
+	return hints
 }
 
-// joinHostPort 将主机名和端口拼接为 host:port 格式，空值时优雅处理。
+// singboxIdentityResolver 针对 Sing-box 运行特征量身定制的身份判定器。
+func singboxIdentityResolver() identity.Resolver {
+	return identity.Resolver{
+		// 授信的元数据 Key，Sing-box 常用 "inbound_user" 携带协议用户名
+		MetadataKeys:    []string{"inbound_user", "auth_user", "user", "name"},
+		RouteTagDecoder: userIDFromRouteTag, // 路由标签解码器（vpnview-user-[hex] -> UserID）
+		IPResolver:      domain.GetUserByIP, // 订阅时 IP 映射缓存反查
+		AllowIPFallback: true,               // 支持 IP 兜底
+	}
+}
+
+func metaValueString(value any) string {
+	switch v := value.(type) {
+	case string:
+		return v
+	case float64:
+		return fmt.Sprintf("%.0f", v)
+	case int:
+		return fmt.Sprintf("%d", v)
+	default:
+		return ""
+	}
+}
+
 func joinHostPort(host, port string) string {
 	if host == "" {
 		return ""

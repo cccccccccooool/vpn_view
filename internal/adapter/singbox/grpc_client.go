@@ -1,5 +1,13 @@
-// grpc_client.go 实现了通过 V2Ray Stats gRPC API 读取用户流量统计数据的功能。
-// 使用轻量级的内联 protobuf 消息定义，无需引入完整的 V2Ray proto 依赖。
+// ============================================================================
+// 文件说明：internal/adapter/singbox/grpc_client.go
+// 职责概览：实现通过 V2Ray Stats gRPC API 动态拉取 Sing-box 底层精准流量数据的接口客户端。
+//           对外实现 GRPCTrafficReader。
+//           为了极致的包大小和零编译摩擦阻碍，本组件使用了轻量级“内联二进制 Protobuf 消息编码解码”
+//           模式，彻底免除了引入复杂庞大的外部 V2Ray API protobuf 生成库的编译烦恼。
+//           通过抓取以 `user>>>` 开头的内部流量键，高内聚的翻译拆解出对应用户的
+//           上传、下载流量字节数，作为主程序定时流量轮询最优先、最精准的首选数据源。
+// ============================================================================
+
 package singbox
 
 import (
@@ -15,17 +23,16 @@ import (
 	"vpnview/internal/port"
 )
 
-// statsServiceQueryMethod 是 V2Ray Stats gRPC 服务的 QueryStats 方法全路径。
+// statsServiceQueryMethod 是 V2Ray 官方自带的流量监控 gRPC 终点 QueryStats 方法的全网调用路由。
 const statsServiceQueryMethod = "/v2ray.core.app.stats.command.StatsService/QueryStats"
 
-// GRPCTrafficReader 通过 V2Ray Stats gRPC API 查询用户流量统计数据。
-// 实现了 TrafficReader 接口。
+// GRPCTrafficReader 利用 gRPC 接口直连 Sing-box 内部抓取最底层的统计数据。
 type GRPCTrafficReader struct {
-	conn *grpc.ClientConn // 底层 gRPC 连接
+	conn *grpc.ClientConn // 底层维持的 gRPC 物理网络连接句柄
 }
 
-// NewGRPCTrafficReader 创建一个新的 GRPCTrafficReader，连接到指定的 V2Ray Stats gRPC 地址。
-// 使用 insecure 凭证（不加密），适用于本地回环地址场景。
+// NewGRPCTrafficReader 创建并初始化一个 GRPCTrafficReader 客户端。
+// 连接超时设为 5 秒，采用无证书明文（Insecure）传输机制（适配本地回环接口）。
 func NewGRPCTrafficReader(address string) (*GRPCTrafficReader, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -37,14 +44,17 @@ func NewGRPCTrafficReader(address string) (*GRPCTrafficReader, error) {
 	return &GRPCTrafficReader{conn: conn}, nil
 }
 
-// QueryTraffic 查询所有用户的累计流量统计。
-// 通过匹配 "user>>>" 前缀获取用户级别的上行/下行流量数据。
+// QueryTraffic 发起 gRPC 请求，拉取所有以 `user>>>` 前缀匹配的流量统计报表。
+// 数据流与精密度：
+//  - 这是 Sing-box 原生提供的最精准的累计统计方案（不会发生漏记）。
+//  - 获取数据后解析 `user>>>[UserID]>>>traffic>>>uplink|downlink` 指标并汇总返回。
 func (r *GRPCTrafficReader) QueryTraffic(ctx context.Context) ([]port.TrafficSnapshot, error) {
 	req := &QueryStatsRequest{
 		Pattern: "user>>>",
-		Reset_:  false,
+		Reset_:  false, // 仅查询，不重置底层计数器，由主程序差值算速度
 	}
 	var resp QueryStatsResponse
+	// 🏆 巧妙之处：利用 legacyProtoCodec 自定义编解码，完美兼容 Go 较新 grpc 库下编解码 v1 proto 的兼容问题
 	if err := r.conn.Invoke(ctx, statsServiceQueryMethod, req, &resp, grpc.ForceCodec(legacyProtoCodec{})); err != nil {
 		return nil, err
 	}
@@ -74,7 +84,7 @@ func (r *GRPCTrafficReader) QueryTraffic(ctx context.Context) ([]port.TrafficSna
 	return out, nil
 }
 
-// Close 关闭底层的 gRPC 连接。
+// Close 关闭与 Sing-box API 端的物理 gRPC 长连接。
 func (r *GRPCTrafficReader) Close() error {
 	if r.conn == nil {
 		return nil
@@ -82,8 +92,9 @@ func (r *GRPCTrafficReader) Close() error {
 	return r.conn.Close()
 }
 
-// parseUserTrafficStat 解析 V2Ray 统计项名称（格式: "user>>>userID>>>traffic>>>uplink|downlink"）。
-// 返回解析出的用户 ID、方向（uplink/downlink）以及是否解析成功。
+// parseUserTrafficStat 解构翻译 V2Ray 原生监控的指标名称字符串。
+// 格式："user>>>[UserID]>>>traffic>>>uplink|downlink"
+// 返回解出的用户 ID、传输方向、及合法性 ok 标志。
 func parseUserTrafficStat(name string) (userID, direction string, ok bool) {
 	parts := strings.Split(name, ">>>")
 	if len(parts) < 4 || parts[0] != "user" || parts[2] != "traffic" {
@@ -95,14 +106,14 @@ func parseUserTrafficStat(name string) (userID, direction string, ok bool) {
 	return parts[1], parts[3], true
 }
 
-// legacyProtoCodec keeps the inline v1 protobuf messages compatible with
-// newer grpc-go versions, whose default codec expects v2 protobuf messages.
+// legacyProtoCodec 专用轻量编解码驱动。
+// 解决较新版本的 gRPC-go 默认仅期望 v2 格式 proto 消息的阻碍，维持内联 v1 消息的安全运行。
 type legacyProtoCodec struct{}
 
 func (legacyProtoCodec) Marshal(v any) ([]byte, error) {
 	msg, ok := v.(proto.Message)
 	if !ok {
-		return nil, fmt.Errorf("legacy proto codec expects proto.Message, got %T", v)
+		return nil, fmt.Errorf("legacy proto 编解码器期望传入 proto.Message, 实际传入 %T", v)
 	}
 	return proto.Marshal(msg)
 }
@@ -110,7 +121,7 @@ func (legacyProtoCodec) Marshal(v any) ([]byte, error) {
 func (legacyProtoCodec) Unmarshal(data []byte, v any) error {
 	msg, ok := v.(proto.Message)
 	if !ok {
-		return fmt.Errorf("legacy proto codec expects proto.Message, got %T", v)
+		return fmt.Errorf("legacy proto 编解码器期望传入 proto.Message, 实际传入 %T", v)
 	}
 	return proto.Unmarshal(data, msg)
 }
@@ -119,10 +130,14 @@ func (legacyProtoCodec) Name() string {
 	return "proto"
 }
 
-// QueryStatsRequest 是 V2Ray StatsService.QueryStats 的请求消息（内联 protobuf 定义）。
+// ============================================================================
+// 下方为内联的轻量级 Protobuf 消息结构体，免除安装外部 protoc 工具生成的编译壁垒。
+// ============================================================================
+
+// QueryStatsRequest V2Ray 接口请求结构。
 type QueryStatsRequest struct {
-	Pattern string `protobuf:"bytes,1,opt,name=pattern,proto3" json:"pattern,omitempty"` // 统计项名称匹配模式
-	Reset_  bool   `protobuf:"varint,2,opt,name=reset,proto3" json:"reset,omitempty"`    // 查询后是否重置计数器
+	Pattern string `protobuf:"bytes,1,opt,name=pattern,proto3" json:"pattern,omitempty"` // 指标键名过滤正则
+	Reset_  bool   `protobuf:"varint,2,opt,name=reset,proto3" json:"reset,omitempty"`    // 查询完毕后是否物理清零底座计数器
 }
 
 func (m *QueryStatsRequest) ResetMessage() { *m = QueryStatsRequest{} }
@@ -132,19 +147,19 @@ func (m *QueryStatsRequest) String() string {
 func (*QueryStatsRequest) ProtoMessage() {}
 func (m *QueryStatsRequest) Reset()      { m.ResetMessage() }
 
-// QueryStatsResponse 是 V2Ray StatsService.QueryStats 的响应消息（内联 protobuf 定义）。
+// QueryStatsResponse V2Ray 接口响应结构。
 type QueryStatsResponse struct {
-	Stat []*Stat `protobuf:"bytes,1,rep,name=stat,proto3" json:"stat,omitempty"` // 匹配的统计项列表
+	Stat []*Stat `protobuf:"bytes,1,rep,name=stat,proto3" json:"stat,omitempty"` // 扫描到的指标详情列表
 }
 
 func (m *QueryStatsResponse) Reset()         { *m = QueryStatsResponse{} }
 func (m *QueryStatsResponse) String() string { return proto.CompactTextString(m) }
 func (*QueryStatsResponse) ProtoMessage()    {}
 
-// Stat 表示单个统计项，包含名称和数值（内联 protobuf 定义）。
+// Stat 单个统计指标名与其累计数值（字节数）。
 type Stat struct {
-	Name  string `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`    // 统计项名称，如 "user>>>alice>>>traffic>>>uplink"
-	Value int64  `protobuf:"varint,2,opt,name=value,proto3" json:"value,omitempty"` // 统计值（字节数）
+	Name  string `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`    // 指标名字，如 "user>>>demo>>>traffic>>>uplink"
+	Value int64  `protobuf:"varint,2,opt,name=value,proto3" json:"value,omitempty"` // 指标总数值（累计字节数）
 }
 
 func (m *Stat) Reset()         { *m = Stat{} }

@@ -1,5 +1,11 @@
-// Package port 定义了 VPNView 的端口接口（ports），遵循六边形架构。
-// 包含 VPN 适配器、数据存储和 DDNS 等外部依赖的抽象接口。
+// ============================================================================
+// 文件说明：internal/port/vpnadapter.go
+// 职责概览：定义了 VPNView 与底层 VPN 代理客户端（如 Sing-box、Xray）交互的统一公共
+//           核心端口接口（port.VPNAdapter）。规定了所有适配器必须实现的固定方法，包括
+//           用户增删改查生命周期、流量累计数据查询、实时网速查询、活跃连接管理和订阅生成，
+//           提供了系统底层的强一致性约定，保证主程序能完美适配任何具体代理后端。
+// ============================================================================
+
 package port
 
 import (
@@ -9,80 +15,97 @@ import (
 	"vpnview/internal/domain"
 )
 
-// CredentialField 描述用户凭据的一个字段定义，用于前端动态渲染表单。
+// CredentialField 描述创建或修改用户凭据时，某个字段在前端动态渲染和输入的属性。
+// 避免了前端写死不同 VPN 协议所需的表单字段（如 VLESS 需要 UUID，Trojan 需要 Password 等）。
 type CredentialField struct {
-	Key          string   `json:"key"`                      // 字段标识键
-	Label        string   `json:"label"`                    // 显示标签
-	Type         string   `json:"type"`                     // 字段类型（如 "text", "password", "select"）
-	Required     bool     `json:"required"`                 // 是否必填
-	Default      string   `json:"default,omitempty"`        // 默认值
-	Options      []string `json:"options,omitempty"`        // 可选值列表（仅 select 类型使用）
-	AutoGenerate bool     `json:"auto_generate"`            // 是否支持自动生成（如 UUID）
-	DependsOnKey string   `json:"depends_on_key,omitempty"` // 条件依赖的字段键名
-	DependsOnVal string   `json:"depends_on_val,omitempty"` // 条件依赖的字段值
+	Key          string   `json:"key"`                      // 字段在凭据 map 中的 Key 标识
+	Label        string   `json:"label"`                    // 前端显示的中文标签/字段名称
+	Type         string   `json:"type"`                     // 字段渲染输入框类型（"text" 文本, "password" 密码框, "select" 下拉单选）
+	Required     bool     `json:"required"`                 // 是否必填项
+	Default      string   `json:"default,omitempty"`        // 默认填充值
+	Options      []string `json:"options,omitempty"`        // 仅在 select 类型下生效的备选选项值列表
+	AutoGenerate bool     `json:"auto_generate"`            // 是否允许一键自动生成（如自动生成 UUID）
+	DependsOnKey string   `json:"depends_on_key,omitempty"` // 级联依赖条件字段的 Key（用于前端逻辑）
+	DependsOnVal string   `json:"depends_on_val,omitempty"` // 级联依赖条件字段满足时的特定匹配值，只有当 DependsOnKey 字段的值等于 DependsOnVal 时此字段才显示
 }
 
-// TrafficSnapshot 表示某一时刻单个用户的流量快照。
+// TrafficSnapshot 表示某一瞬时时刻，单个用户的总流量快照信息。
 type TrafficSnapshot struct {
-	UserID   string `json:"user_id"`  // 用户 ID
-	Upload   int64  `json:"upload"`   // 上传流量（字节）
-	Download int64  `json:"download"` // 下载流量（字节）
+	UserID   string `json:"user_id"`  // 用户唯一 ID 标识
+	Upload   int64  `json:"upload"`   // 当前时刻累计的上传流量（字节数）
+	Download int64  `json:"download"` // 当前时刻累计的下载流量（字节数）
 }
 
-// GlobalSpeed 表示全局实时上下行速度。
+// GlobalSpeed 表示整个 VPN 后端在当前时刻的全局实时上传、下载速率（速度包）。
 type GlobalSpeed struct {
-	Up   int64 `json:"up"`   // 上传速度（字节/秒）
-	Down int64 `json:"down"` // 下载速度（字节/秒）
+	Up   int64 `json:"up"`   // 当前实时上传速度（字节/秒）
+	Down int64 `json:"down"` // 当前实时下载速度（字节/秒）
 }
 
-// ActiveConnection 表示一条正在进行的活跃连接详情。
+// ActiveConnection 描述当前正在运行的单个活跃的网络 TCP/UDP 连接详情。
 type ActiveConnection struct {
-	ID          string    `json:"id"`                // 连接唯一标识
-	UserID      string    `json:"user_id,omitempty"` // 关联用户 ID（可能为空）
-	Upload      int64     `json:"upload"`            // 该连接已上传字节数
-	Download    int64     `json:"download"`          // 该连接已下载字节数
-	Start       time.Time `json:"start"`             // 连接建立时间
-	Network     string    `json:"network"`           // 网络协议（如 "tcp", "udp"）
-	Source      string    `json:"source"`            // 来源地址
-	Destination string    `json:"destination"`       // 目标地址
+	ID          string    `json:"id"`                // 连接唯一生成的 UUID 或序列标识
+	UserID      string    `json:"user_id,omitempty"` // 关联的 VPN 用户 ID（如果无法解析或非认证连接，则为空）
+	Upload      int64     `json:"upload"`            // 该活跃连接目前已发送的上传流量（字节数）
+	Download    int64     `json:"download"`          // 该活跃连接目前已接收的下载流量（字节数）
+	Start       time.Time `json:"start"`             // 连接建立的准确时间戳
+	Network     string    `json:"network"`           // 连接网络协议类型（如 "tcp", "udp"）
+	Source      string    `json:"source"`            // 连接发起方的 IP 和源端口
+	Destination string    `json:"destination"`       // 连接的目标请求服务器 IP 和目的端口
 }
 
-// VPNAdapter 定义了与底层 VPN 代理（如 Xray、Sing-box）交互的统一接口。
-// 不同的 VPN 后端通过实现此接口来接入系统，适配器可通过 Capabilities 声明自身支持的功能子集。
+// ProfileProvider 是一个可选的高级接口，当底层适配器除了返回位掩码之外，还能
+// 结构化描述其内部更高级的特性分布（如配置加载模式、流量计算粒度、认证配置属性等）时实现该接口。
+type ProfileProvider interface {
+	// Profile 返回该适配器的结构化特征行为描述配置。
+	Profile() domain.AdapterProfile
+}
+
+// VPNAdapter 定义了主程序与底层 VPN 网络代理内核进行数据交互和控制管理的标准统一核心接口。
+// 所有的 VPN 客户端内核（如 Sing-box 客户端，Xray 客户端，测试 mock 桩等）必须完整实现该接口。
 type VPNAdapter interface {
-	// Capabilities 返回该适配器支持的能力位掩码。
+	// Capabilities 返回当前适配器所支持的能力位掩码集（如是否支持速度限制、活跃连接监控等）。
 	Capabilities() domain.Capability
-	// CredentialFields 返回创建用户时所需的凭据字段定义列表。
+
+	// CredentialFields 返回该适配器所期望的凭据定义表，供前端动态创建表单界面。
 	CredentialFields() []CredentialField
 
-	// ListUsers 列出适配器中所有已注册的用户 ID。
+	// ListUsers 查询并获取底层代理后端中已经注册并存在的全部用户 ID 列表。
 	ListUsers(ctx context.Context) ([]string, error)
-	// AddUser 向适配器添加一个用户及其凭据。
+
+	// AddUser 向底层代理添加一个用户账户，并传递该用户所需的具体协议凭据（如密码、流控协议等）。
 	AddUser(ctx context.Context, userID string, credentials map[string]string) error
-	// RemoveUser 从适配器中移除指定用户。
+
+	// RemoveUser 从底层代理彻底移除某用户，防止其连接，并清理对应的全部配置资源。
 	RemoveUser(ctx context.Context, userID string) error
-	// DisableUser 禁用指定用户，使其无法连接但保留配置。
+
+	// DisableUser 禁用指定用户账户，使其无法建立新的连接，但在配置中依旧保留用户主体。
 	DisableUser(ctx context.Context, userID string) error
-	// EnableUser 重新启用被禁用的用户，需要提供凭据以恢复配置。
+
+	// EnableUser 重新启用此前被禁用的用户，通常在用户续费重置时调用，并同步传入其最新的连接凭据。
 	EnableUser(ctx context.Context, userID string, credentials map[string]string) error
 
-	// QueryTraffic 查询所有用户的累计流量快照，由主程序计算相邻快照差值。
+	// QueryTraffic 核心轮询接口。查询所有用户的累计流量快照。主程序通过定时器前后两次调用的差值算得实时速度。
 	QueryTraffic(ctx context.Context) ([]TrafficSnapshot, error)
-	// GetGlobalSpeed 获取全局实时上下行速度。
+
+	// GetGlobalSpeed 获取整个代理服务器的全局瞬时实时吞吐上传与下载速度。
 	GetGlobalSpeed(ctx context.Context) (*GlobalSpeed, error)
-	// GetActiveConnections 获取当前所有活跃连接列表。
+
+	// GetActiveConnections 抓取当前所有维持中的活跃连接记录列表。
 	GetActiveConnections(ctx context.Context) ([]ActiveConnection, error)
-	// KillConnection 断开指定 ID 的活跃连接。
+
+	// KillConnection 强制切断某一个具体 ID 的活动网络连接。
 	KillConnection(ctx context.Context, connID string) error
 
-	// SetUserSpeedLimit 设置指定用户的上传和下载限速（字节/秒）。
+	// SetUserSpeedLimit 对单个 VPN 用户实施最大上传与下载的网速上限控制（字节/秒）。如果不被底层支持，返回 ErrNotSupported。
 	SetUserSpeedLimit(ctx context.Context, userID string, uploadBytesPerSec, downloadBytesPerSec int64) error
-	// SetGlobalSpeedLimit 设置全局上传和下载限速（字节/秒）。
+
+	// SetGlobalSpeedLimit 对代理服务器整机实施最大全局上传和下载吞吐网速控制（字节/秒）。如果不被支持，返回 ErrNotSupported。
 	SetGlobalSpeedLimit(ctx context.Context, uploadBytesPerSec, downloadBytesPerSec int64) error
 
-	// GenerateSubscription 为指定用户生成订阅内容，返回订阅数据、MIME 类型和可能的错误。
+	// GenerateSubscription 为用户量身定制地生成其可直接接入的客户端订阅链接配置文件文本内容及 MIME-Type 类型。
 	GenerateSubscription(ctx context.Context, userID string, credentials map[string]string) ([]byte, string, error)
 
-	// Close 关闭适配器连接并释放资源。
+	// Close 安全关闭与底层网络代理的数据通信或 API 长连接，归还系统资源。
 	Close() error
 }

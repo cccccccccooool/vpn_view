@@ -1,5 +1,15 @@
-// config_manager.go 负责 sing-box 配置文件的读写和用户管理。
-// 通过模板注入机制，将内存中的用户凭证动态写入 sing-box JSON 配置文件。
+// ============================================================================
+// 文件说明：internal/adapter/singbox/config_manager.go
+// 职责概览：Sing-box 适配器内部的 JSON 配置文件模板动态渲染与读写管理器（ConfigManager）。
+//           负责管理底座中 Inbound 下的 users 认证表。
+//           提供 loadUsersFromConfig 反向解析过渡功能，支持自动冷启动检测初始化。
+//           核心功能（同步注入流量监控）：
+//           在 writeConfigLocked 覆写配置文件的瞬间，会自动将当前系统的所有用户 ID
+//           注入到 Sing-box 配置文件的 `experimental.v2ray_api.stats.users` 中，
+//           以此完美拉起并激活底层 gRPC 精准统计，同时利用用户分流 RouteMarker 机制，
+//           解决无用户特征协议的身份识别。
+// ============================================================================
+
 package singbox
 
 import (
@@ -15,45 +25,46 @@ import (
 	"sync"
 )
 
-// ConfigManager 管理 sing-box 配置文件中的用户数据。
-// 维护内存中的用户凭证副本，并负责将变更同步回写到 JSON 配置文件。
+// ConfigManager 负责维护内存用户数据与底层物理 JSON 配置文件读写的对齐同步。
 type ConfigManager struct {
-	cfg   Config                       // 适配器配置
-	mu    sync.Mutex                   // 保护 users 的并发读写
-	users map[string]map[string]string // userID -> credentials 的内存映射
+	cfg   Config                       // 适配器配置项
+	mu    sync.Mutex                   // 并发读写锁
+	users map[string]map[string]string // 内存中的用户凭据缓存 userID -> credentials
 }
 
-// NewConfigManager 创建并初始化 ConfigManager。
-// 初始化过程中会尝试从已有配置文件反向加载用户，并在配置文件不存在时自动根据模板创建。
+// NewConfigManager 实例化并创建一个 ConfigManager。
+// 启动逻辑：
+//  1. 尝试从已有的运行配置文件反向加载解析出历史用户（平滑过渡，防止面板初始化时踢掉已有连接）。
+//  2. 🏆 自动冷启动防护：如果运行配置文件物理不存在，会自动根据底座模板（ConfigTemplatePath）级联创建并生成。
+//  3. 流量监控强刷：如果文件已经存在，也会强制 writeConfigLocked 刷盘写入一次，目的是将面板现存的所有用户 UUID
+//     注入到 experimental.v2ray_api.stats.users 指标配置中，激活底层流量度量。
 func NewConfigManager(cfg Config) (*ConfigManager, error) {
 	m := &ConfigManager{
 		cfg:   cfg,
 		users: make(map[string]map[string]string),
 	}
 
-	// 尝试反向加载已有配置中的用户（进行平滑过渡）
+	// 1. 反向平滑过渡加载
 	if cfg.ConfigPath != "" {
 		if err := m.loadUsersFromConfig(); err != nil && !os.IsNotExist(err) {
 			return nil, err
 		}
 	}
 
-	// 🏆 自动冷启动与流量统计同步激活：
-	// 如果配置文件不存在，则立即根据模板生成。
-	// 如果配置文件已经存在，我们也会强制 writeConfigLocked 一次，以确保 `experimental.v2ray_api.stats.users` 中注入了所有后台用户的唯一 UUID，从而激活精准的流量统计功能！
+	// 2. 冷启动初始化与统计强制刷新
 	if cfg.ConfigPath != "" {
 		if _, err := os.Stat(cfg.ConfigPath); os.IsNotExist(err) {
-			slog.Info("未检测到 sing-box 运行配置文件，正在根据底板自动初始化创建...", "path", cfg.ConfigPath)
+			slog.Info("未检测到 Sing-box 运行配置文件，正在根据底座模板自动冷启动创建...", "path", cfg.ConfigPath)
 			if err := m.writeConfigLocked(); err != nil {
-				return nil, fmt.Errorf("自动初始化 sing-box 配置失败: %w", err)
+				return nil, fmt.Errorf("冷启动初始化 Sing-box 配置文件失败: %w", err)
 			}
-			slog.Info("🎉 自动初始化 sing-box 运行配置文件成功！", "path", cfg.ConfigPath)
+			slog.Info("🎉 冷启动自动初始化 Sing-box 运行配置文件成功", "path", cfg.ConfigPath)
 		} else {
-			slog.Info("正在同步更新已有 sing-box 配置文件以确保流量统计生效...", "path", cfg.ConfigPath)
+			slog.Info("正在增量重构刷新已有 Sing-box 配置以强行激活流量精准统计...", "path", cfg.ConfigPath)
 			if err := m.writeConfigLocked(); err != nil {
-				slog.Error("同步更新 sing-box 配置文件失败", "err", err)
+				slog.Error("重置同步已有 Sing-box 配置失败", "err", err)
 			} else {
-				slog.Info("🎉 同步更新 sing-box 配置文件成功！")
+				slog.Info("🎉 增量重构刷新 Sing-box 配置文件完成！")
 			}
 		}
 	}
@@ -61,7 +72,7 @@ func NewConfigManager(cfg Config) (*ConfigManager, error) {
 	return m, nil
 }
 
-// ListUsers 返回内存中所有已注册用户的 ID 列表（按字典序排序）。
+// ListUsers 获取当前已经从运行配置文件反解及登记的内存用户 ID 列表（排序输出）。
 func (m *ConfigManager) ListUsers(ctx context.Context) ([]string, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -74,7 +85,7 @@ func (m *ConfigManager) ListUsers(ctx context.Context) ([]string, error) {
 	return ids, nil
 }
 
-// AddUser 添加用户凭证到内存并立即回写配置文件。
+// AddUser 新增或修改单个用户凭据并即刻保存刷写至物理 JSON 配置文件中。
 func (m *ConfigManager) AddUser(ctx context.Context, userID string, credentials map[string]string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -83,17 +94,16 @@ func (m *ConfigManager) AddUser(ctx context.Context, userID string, credentials 
 	return m.writeConfigLocked()
 }
 
-// RemoveUser 从内存中删除指定用户并立即回写配置文件。
+// RemoveUser 从内存字典彻底抹除目标用户并重新刷写回写物理 JSON 配置文件。
 func (m *ConfigManager) RemoveUser(ctx context.Context, userID string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	// 从内存中删除用户凭证，并立即回写配置文件
 	delete(m.users, userID)
 	return m.writeConfigLocked()
 }
 
-// Reload 尝试通过执行配置好的外部命令（如 systemctl reload sing-box）来重新加载 sing-box 进程
+// Reload 通过在本地物理系统执行命令（如 systemctl reload sing-box）让代理应用平滑热重载最新配置。
 func (m *ConfigManager) Reload(ctx context.Context) error {
 	if m.cfg.ReloadCommand == "" {
 		return nil
@@ -102,15 +112,18 @@ func (m *ConfigManager) Reload(ctx context.Context) error {
 	if len(parts) == 0 {
 		return nil
 	}
+	// 利用 ExecCommand 执行热更
 	cmd := exec.CommandContext(ctx, parts[0], parts[1:]...)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("reload command failed: %w: %s", err, strings.TrimSpace(string(out)))
+		return fmt.Errorf("热更新命令执行失败: %w, 命令输出: %s", err, strings.TrimSpace(string(out)))
 	}
 	return nil
 }
 
-// loadUsersFromConfig 从配置文件中解析并加载已有的用户凭证到内存中
+// loadUsersFromConfig 反解过渡工具。
+// 启动时读取现有 JSON 文件，反解出 VMESS/VLESS/Trojan/Shadowsocks 等 inbound.users 列表并加载到内存，
+// 防止面板初次挂载导致历史客户端断连。
 func (m *ConfigManager) loadUsersFromConfig() error {
 	path := m.cfg.ConfigPath
 	if _, err := os.Stat(path); os.IsNotExist(err) {
@@ -123,15 +136,14 @@ func (m *ConfigManager) loadUsersFromConfig() error {
 
 	var root map[string]any
 	if err := json.Unmarshal(raw, &root); err != nil {
-		return fmt.Errorf("parse sing-box config: %w", err)
+		return fmt.Errorf("解析模板 JSON 配置文件失败: %w", err)
 	}
 
 	inbounds, ok := root["inbounds"].([]any)
 	if !ok {
-		return fmt.Errorf("sing-box config has no inbounds array")
+		return fmt.Errorf("配置模板不包含合规的 inbounds 数组")
 	}
 
-	// 遍历底板或成品配置文件里的所有 inbound，解析并加载已有用户
 	for _, item := range inbounds {
 		inbound, ok := item.(map[string]any)
 		if !ok {
@@ -143,7 +155,7 @@ func (m *ConfigManager) loadUsersFromConfig() error {
 			continue
 		}
 
-		// 若指定了 InboundTag，只解析匹配该 Tag 的 inbound（保持向后兼容）
+		// inbound tag 过滤器对齐
 		if m.cfg.InboundTag != "" && inbound["tag"] != m.cfg.InboundTag {
 			continue
 		}
@@ -155,7 +167,7 @@ func (m *ConfigManager) loadUsersFromConfig() error {
 				continue
 			}
 
-			// 优先取 name, username, uuid, password 作为内部 ID
+			// vm/vless/trojan 首选提取 name 或 uuid 作为用户标志 ID
 			id := firstString(userMap, "name", "username", "uuid", "password")
 			if id == "" {
 				continue
@@ -166,7 +178,7 @@ func (m *ConfigManager) loadUsersFromConfig() error {
 
 			for k, v := range userMap {
 				if s, ok := v.(string); ok && k != "name" {
-					// 针对 shadowsocks，反向还原 password 和 method 为 ss_password 和 ss_method
+					// Shadowsocks 加密专有字段的反向翻译
 					if protoType == "shadowsocks" {
 						if k == "password" {
 							creds["ss_password"] = s
@@ -186,7 +198,16 @@ func (m *ConfigManager) loadUsersFromConfig() error {
 	return nil
 }
 
-// writeConfigLocked 读取模板（或当前文件），将内存中的用户凭证注入，并回写生成最终的 sing-box 配置文件
+// writeConfigLocked 读取底板模板、动态注入内存中的活跃 users 表、生成精准流量监控标识、并重构写盘。
+// 流程：
+//  1. 取得底座模板（SOURCE）进行反序列化。
+//  2. 扫描 inbounds，针对匹配的 tag，清空原 users 并全新注入本管理面板登记的对应协议的所有用户（VMESS、VLESS 等）。
+//  3. 🏆 强制注入 V2Ray Stats 流量监控列表：
+//     - 抽取当前全员 UserIDs。
+//     - 重构写入 experimental.v2ray_api.stats.users。这能使底层内置 V2Ray gRPC 流量统计引擎知道监控哪些用户。
+//  4. 🏆 分流防白嫖：调用 injectUserRouteMarkers 建立以 `vpnview-user-[hex]` 命名的专用分流 Direct 路由 rules 绑定，
+//     以便 Clash API 能精准获取来源握手关系。
+//  5. 写回 ConfigPath，自动创建所属目录。
 func (m *ConfigManager) writeConfigLocked() error {
 	if err := m.cfg.ValidateForConfigWrites(); err != nil {
 		return err
@@ -198,17 +219,17 @@ func (m *ConfigManager) writeConfigLocked() error {
 	}
 	var root map[string]any
 	if err := json.Unmarshal(raw, &root); err != nil {
-		return fmt.Errorf("parse sing-box config: %w", err)
+		return fmt.Errorf("解析底座 JSON 配置文件模板失败: %w", err)
 	}
 
 	inbounds, ok := root["inbounds"].([]any)
 	if !ok {
-		return fmt.Errorf("sing-box config has no inbounds array")
+		return fmt.Errorf("底座模板缺少 inbounds 数组定义")
 	}
 
 	managedInboundTags := make([]string, 0)
 
-	// 针对每一个 inbound 动态注入匹配协议的用户
+	// 动态注入
 	for _, item := range inbounds {
 		inbound, ok := item.(map[string]any)
 		if !ok {
@@ -220,12 +241,10 @@ func (m *ConfigManager) writeConfigLocked() error {
 			continue
 		}
 
-		// 若指定了 InboundTag，只注入匹配该 Tag 的 inbound
 		if m.cfg.InboundTag != "" && inbound["tag"] != m.cfg.InboundTag {
 			continue
 		}
 
-		// 根据协议类型构建用户数组并注入
 		users := m.buildUsersArrayForProtocol(protoType)
 		inbound["users"] = users
 		if len(users) > 0 {
@@ -235,7 +254,7 @@ func (m *ConfigManager) writeConfigLocked() error {
 		}
 	}
 
-	// 🏆 动态注入所有用户到 experimental.v2ray_api.stats.users 列表中，生成 V2Ray 流量计数器
+	// 🏆 流量指标注入
 	userIDs := make([]string, 0, len(m.users))
 	for id := range m.users {
 		userIDs = append(userIDs, id)
@@ -245,21 +264,22 @@ func (m *ConfigManager) writeConfigLocked() error {
 	stats := ensureMap(ensureMap(ensureMap(root, "experimental"), "v2ray_api"), "stats")
 	stats["enabled"] = true
 	stats["users"] = userIDs
+
+	// 🏆 身份反查分流注入
 	m.injectUserRouteMarkers(root, managedInboundTags, userIDs)
 
 	if err := os.MkdirAll(filepath.Dir(m.cfg.ConfigPath), 0755); err != nil {
 		return err
 	}
+
 	out, err := json.MarshalIndent(root, "", "  ")
 	if err != nil {
 		return err
 	}
-	// 保存最终配置文件，供 sing-box 运行或重载读取
 	return os.WriteFile(m.cfg.ConfigPath, append(out, '\n'), 0644)
 }
 
-// configSourcePath 返回读取配置模板的文件路径。
-// 优先使用 ConfigTemplatePath，为空时回退到 ConfigPath。
+// configSourcePath 提取底盘文件的真实加载来源。
 func (m *ConfigManager) configSourcePath() string {
 	if m.cfg.ConfigTemplatePath != "" {
 		return m.cfg.ConfigTemplatePath
@@ -267,14 +287,13 @@ func (m *ConfigManager) configSourcePath() string {
 	return m.cfg.ConfigPath
 }
 
-// buildUsersArrayForProtocol 根据指定协议类型，从内存中筛选匹配的用户并构建 sing-box users JSON 数组。
-// 对 shadowsocks 协议进行字段名映射（ss_password -> password, ss_method -> method）。
+// buildUsersArrayForProtocol 提取匹配协议类型的活跃用户凭证，并重构为 Sing-box 的 inbound 内部 users 的 JSON 定义格式。
 func (m *ConfigManager) buildUsersArrayForProtocol(protocol string) []any {
 	ids := make([]string, 0)
 	for id, creds := range m.users {
 		proto := creds["protocol"]
 		if proto == "" {
-			proto = "vless" // 默认 fallback 为 vless
+			proto = "vless"
 		}
 		if proto == protocol {
 			ids = append(ids, id)
@@ -290,7 +309,7 @@ func (m *ConfigManager) buildUsersArrayForProtocol(protocol string) []any {
 				continue
 			}
 
-			// 如果是 shadowsocks，在写入配置文件时进行字段名映射适配
+			// Shadowsocks 写配置协议字段适配
 			if protocol == "shadowsocks" {
 				if k == "ss_password" {
 					item["password"] = v
@@ -309,9 +328,8 @@ func (m *ConfigManager) buildUsersArrayForProtocol(protocol string) []any {
 	return out
 }
 
-// injectUserRouteMarkers routes each authenticated user through an equivalent
-// direct outbound with a reversible tag, so Clash API connection chains can be
-// mapped back to the panel user even when metadata omits auth_user.
+// injectUserRouteMarkers 为每个受管理的用户构建一条专用的 Direct 出站，并在 route.rules 里强制进行路由映射绑定。
+// 巧妙之处：这允许主程序利用分流标签还原身份，完美打通了无用户特征协议在 Clash API 下的身份反查解析。
 func (m *ConfigManager) injectUserRouteMarkers(root map[string]any, inboundTags, userIDs []string) {
 	outbounds, ok := root["outbounds"].([]any)
 	if !ok || len(userIDs) == 0 {
@@ -320,7 +338,7 @@ func (m *ConfigManager) injectUserRouteMarkers(root map[string]any, inboundTags,
 
 	baseOutbound := findBaseDirectOutbound(root, outbounds)
 	if baseOutbound == nil {
-		slog.Warn("skip sing-box user route markers: no direct outbound found")
+		slog.Warn("跳过 Sing-box 路由标记注入：未找到直连出站出入口 (direct outbound)")
 		return
 	}
 
@@ -432,7 +450,6 @@ func buildManagedUserRules(inboundTags, userIDs []string) []any {
 	return rules
 }
 
-// firstString 从 map 中按优先级依次尝试获取第一个非空字符串值。
 func firstString(m map[string]any, keys ...string) string {
 	for _, key := range keys {
 		if v, ok := m[key].(string); ok && v != "" {
@@ -442,7 +459,6 @@ func firstString(m map[string]any, keys ...string) string {
 	return ""
 }
 
-// ensureMap returns a nested object map, creating or replacing it when needed.
 func ensureMap(parent map[string]any, key string) map[string]any {
 	child, ok := parent[key].(map[string]any)
 	if !ok {
@@ -471,7 +487,6 @@ func cloneAny(v any) any {
 	}
 }
 
-// cloneStringMap 对 string map 进行浅拷贝，避免外部修改影响内部状态。
 func cloneStringMap(in map[string]string) map[string]string {
 	out := make(map[string]string, len(in))
 	for k, v := range in {
