@@ -1,0 +1,33 @@
+name: goreleaser
+
+on:
+  push:
+    tags:
+      - 'v*' # 当推送形如 v1.0.0 的 tag 时触发构建
+
+permissions:
+  contents: write # 必须赋予写入权限，以便 Action 能够创建 Release 并上传附件
+
+jobs:
+  goreleaser:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # 获取完整的 git 历史以生成 changelog
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.23' # 使用与您 go.mod 一致的 Go 1.23 版本
+          cache: true
+
+      - name: Run GoReleaser
+        uses: goreleaser/goreleaser-action@v6
+        with:
+          distribution: goreleaser
+          version: '~> v2'
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} # GitHub 自动生成的 Token，无需手动配置
