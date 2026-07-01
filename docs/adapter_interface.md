@@ -25,6 +25,12 @@ Adapters return a `domain.Capability` bitmask from `Capabilities()`.
 If a capability is not declared, return `domain.ErrNotSupported` from the
 method and let the main program degrade gracefully.
 
+Adapters may also implement `port.ProfileProvider` to expose a structured
+`domain.AdapterProfile`. The profile does not replace the bitmask; it explains
+how the adapter provisions users, reports traffic, resolves identity, applies
+reloads, and stores configuration. New shared orchestration should prefer the
+profile when it is available.
+
 ## Identity and Credentials
 
 `domain.User.ID` is a generic primary key. It can be a UUID, username, email,

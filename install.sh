@@ -189,12 +189,21 @@ record_manifest_file() {
   fi
   python3 - "$MANIFEST_FILE" "$path" "$backup" "$action" <<'PY'
 import json
+import os
+import stat
 import sys
 
 manifest, path, backup, action = sys.argv[1:]
 with open(manifest, "r", encoding="utf-8") as f:
     data = json.load(f)
 entry = {"path": path, "backup": backup, "action": action}
+try:
+    st = os.lstat(path)
+    entry["mode"] = stat.S_IMODE(st.st_mode)
+    entry["uid"] = st.st_uid
+    entry["gid"] = st.st_gid
+except FileNotFoundError:
+    pass
 if entry not in data.setdefault("files", []):
     data["files"].append(entry)
 with open(manifest, "w", encoding="utf-8", newline="\n") as f:
@@ -283,6 +292,19 @@ import sys
 manifest = sys.argv[1]
 with open(manifest, "r", encoding="utf-8") as f:
     data = json.load(f)
+
+def apply_metadata(path, item):
+    mode = item.get("mode")
+    uid = item.get("uid")
+    gid = item.get("gid")
+    try:
+        if mode is not None:
+            os.chmod(path, int(mode))
+        if uid is not None and gid is not None and hasattr(os, "chown"):
+            os.chown(path, int(uid), int(gid))
+    except PermissionError:
+        print(f"metadata restore skipped for {path}: permission denied")
+
 for item in reversed(data.get("files", [])):
     src = item.get("backup", "")
     dst = item.get("path", "")
@@ -305,6 +327,7 @@ for item in reversed(data.get("files", [])):
     else:
         shutil.copy2(src, dst)
         shutil.copystat(src, dst)
+    apply_metadata(dst, item)
     print(f"restored {dst} from {src}")
 for temp in data.get("temps", []):
     if temp and os.path.exists(temp):
@@ -460,6 +483,10 @@ create_default_config() {
   cat > "$CONFIG_FILE" <<EOF
 server:
   listen: "0.0.0.0:19463"
+  tls:
+    enabled: false
+    cert_file: ""
+    key_file: ""
 
 auth:
   secret: "${secret}"
@@ -502,6 +529,13 @@ limits:
   default_quota: 0
   software_limit_strikes: 3
 
+security:
+  csp: "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'"
+  hsts_enabled: true
+  hsts_max_age: 31536000
+  hsts_include_subdomains: true
+  hsts_preload: false
+
 subscription:
   mode: "link"
   domain: ""
@@ -517,6 +551,7 @@ patch_config() {
   local client_config_key="$3"
   local client_config_path="$4"
   python3 - "$CONFIG_FILE" "$adapter_type" "$template_path" "$client_config_key" "$client_config_path" "$DATA_DIR/vpnview.db" <<'PY'
+import re
 import sys
 
 path, adapter_type, template_path, client_config_key, client_config_path, db_path = sys.argv[1:]
@@ -1147,6 +1182,17 @@ EOF
   ok "wrote /etc/systemd/system/${client_service}.service"
 }
 
+verify_systemd_units() {
+  local client_service="${1:-}"
+  command -v systemd-analyze >/dev/null 2>&1 || return 0
+  local units=("/etc/systemd/system/${SERVICE_NAME}.service")
+  if [ -n "$client_service" ]; then
+    units+=("/etc/systemd/system/${client_service}.service")
+  fi
+  systemd-analyze verify "${units[@]}" || die "systemd unit verification failed"
+  ok "systemd unit files passed systemd-analyze verify"
+}
+
 stop_existing_services() {
   local client_service="${1:-}"
   if command -v systemctl >/dev/null 2>&1; then
@@ -1161,28 +1207,14 @@ stop_existing_services() {
 
 run_initial_vpnview_once() {
   local config_path="${1:-$CONFIG_FILE}"
-  log "running VPNView briefly to generate the first client config"
+  log "running VPNView init-once to generate the first client config"
   local log_file="/tmp/vpnview-install-init.log"
-  set +e
-  "$INSTALL_BIN" -config "$config_path" >"$log_file" 2>&1 &
-  local pid=$!
-  sleep 3
-  if kill -0 "$pid" >/dev/null 2>&1; then
-    kill "$pid" >/dev/null 2>&1 || true
-    wait "$pid" >/dev/null 2>&1 || true
-    set -e
-    ok "initial VPNView run completed"
-    return 0
-  fi
-  wait "$pid"
-  local code=$?
-  set -e
-  if [ "$code" -ne 0 ]; then
+  if ! "$INSTALL_BIN" -config "$config_path" -init-once >"$log_file" 2>&1; then
     warn "VPNView exited during initial run. Recent log:"
     tail -n 40 "$log_file" || true
-    die "initial VPNView run failed"
+    die "VPNView init-once failed"
   fi
-  ok "initial VPNView run completed"
+  ok "VPNView init-once completed"
 }
 
 validate_client_config() {
@@ -1290,6 +1322,7 @@ main() {
     warn "panel-only mode: VPNView will be installed without taking over a VPN core service"
     patch_config "stub" "" "" ""
     write_vpnview_service ""
+    verify_systemd_units ""
     systemd_start ""
   elif [ "$adapter_type" != "stub" ]; then
     local configured_path
@@ -1319,12 +1352,14 @@ main() {
     commit_staged_client_config "$staging_config_path" "$client_config_path"
     write_client_service "$adapter_type" "$client_service" "$client_bin" "$client_config_path"
     write_vpnview_service "$client_service"
+    verify_systemd_units "$client_service"
     stop_existing_services "$client_service"
     systemd_start "$client_service"
   else
     warn "adapter ${adapter_type} does not need a managed VPN client service; only VPNView service will be installed"
     patch_config "$adapter_type" "" "" ""
     write_vpnview_service ""
+    verify_systemd_units ""
     systemd_start ""
   fi
 

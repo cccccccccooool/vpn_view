@@ -16,6 +16,7 @@ import (
 	_ "vpnview/internal/adapter/singbox"
 	"vpnview/internal/adapter/store/sqlite"
 	_ "vpnview/internal/adapter/stub"
+	_ "vpnview/internal/adapter/xray"
 	"vpnview/internal/auth"
 	"vpnview/internal/config"
 	"vpnview/internal/core"
@@ -28,6 +29,7 @@ import (
 
 func main() {
 	configPath := flag.String("config", "config.yaml", "config YAML path")
+	initOnce := flag.Bool("init-once", false, "initialize configured cores and exit without starting HTTP services")
 	flag.Parse()
 
 	cfg, err := config.Load(*configPath)
@@ -56,6 +58,10 @@ func main() {
 	userSvc := service.NewUserService(store, coreManager, cfg.Limits)
 
 	syncEnabledUsers(store, coreManager)
+	if *initOnce {
+		slog.Info("init-once completed")
+		return
+	}
 
 	trafficSvc := service.NewTrafficService(store, coreManager, cfg.GetPollInterval())
 	userSvc.AttachTrafficService(trafficSvc)
@@ -80,7 +86,7 @@ func main() {
 
 	go func() {
 		slog.Info("VPNView HTTP server started", "listen", cfg.Server.Listen)
-		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		if err := serveHTTP(server, cfg); err != nil && err != http.ErrServerClosed {
 			slog.Error("HTTP server exited", "err", err)
 			os.Exit(1)
 		}
@@ -110,6 +116,16 @@ func buildStore(cfg *config.Config) (port.UserStore, error) {
 
 func buildCoreManager(cfg *config.Config) (*core.Manager, error) {
 	return core.NewManager(cfg.Cores, cfg.Subscription.Domain)
+}
+
+func serveHTTP(server *http.Server, cfg *config.Config) error {
+	if cfg.Server.TLS.Enabled {
+		if cfg.Server.TLS.CertFile == "" || cfg.Server.TLS.KeyFile == "" {
+			return config.ErrMissingTLSFiles
+		}
+		return server.ListenAndServeTLS(cfg.Server.TLS.CertFile, cfg.Server.TLS.KeyFile)
+	}
+	return server.ListenAndServe()
 }
 
 func logLoadedCores(manager *core.Manager) {

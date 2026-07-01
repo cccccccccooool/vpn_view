@@ -4,6 +4,7 @@
   let timer = null;
   let search = "";
   let bound = false;
+  let lastMobile = null;
 
   const ICONS = {
     edit: "M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zM20.71 7.04c.39-.39.39-1.02 0-1.41l-2.34-2.34a.9959.9959 0 0 0-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z",
@@ -29,35 +30,57 @@
     return window.innerWidth <= 768;
   }
 
+  function availableCores() {
+    const cores = (window.app.cores || []).filter(core => core.enabled && core.status !== "disabled");
+    if (cores.length) return cores;
+    return [{
+      id: window.app.defaultCore || "",
+      type: "default",
+      enabled: true,
+      status: "ready",
+      credential_fields: window.app.credentialFields || [],
+      capabilities: window.app.capabilities || {}
+    }];
+  }
+
+  function coreForID(id) {
+    const cores = availableCores();
+    return cores.find(core => core.id === id) || cores.find(core => core.id === window.app.defaultCore) || cores[0];
+  }
+
+  function fieldsForCore(coreID) {
+    const core = coreForID(coreID);
+    return core?.credential_fields || window.app.credentialFields || [];
+  }
+
+  function capsForCore(coreID) {
+    const core = coreForID(coreID);
+    return core?.capabilities || window.app.capabilities || {};
+  }
+
   function render() {
-    const caps = window.app.capabilities;
-    const createBtn = document.getElementById("btn-create-user");
-    if (createBtn) createBtn.classList.toggle("hidden", !caps.add_user);
-
-    const filtered = users.filter(user => {
-      const q = search.toLowerCase();
-      return !q || (user.name || "").toLowerCase().includes(q) || (user.id || "").toLowerCase().includes(q);
-    });
-
-    if (isMobile()) {
-      renderMobile(filtered, caps);
-    } else {
-      renderDesktop(filtered, caps);
-    }
+    const caps = window.app.capabilities || {};
+    document.getElementById("btn-create-user")?.classList.toggle("hidden", !caps.add_user);
+    const q = search.toLowerCase();
+    const filtered = users.filter(user => !q ||
+      (user.name || "").toLowerCase().includes(q) ||
+      (user.id || "").toLowerCase().includes(q) ||
+      (user.core_id || "").toLowerCase().includes(q) ||
+      (user.adapter_type || "").toLowerCase().includes(q)
+    );
+    if (isMobile()) renderMobile(filtered, caps);
+    else renderDesktop(filtered, caps);
   }
 
   function renderDesktop(filtered, caps) {
     const head = document.getElementById("users-head");
     const body = document.getElementById("users-body");
     if (!head || !body) return;
+    document.querySelector(".mobile-user-list")?.remove();
 
-    const mobileList = document.querySelector(".mobile-user-list");
-    if (mobileList) mobileList.remove();
-
-    const cols = ["名称", "ID"];
+    const cols = ["名称", "ID", "核心"];
     if (caps.user_speed) cols.push("速率");
-    cols.push("流量", "配额", "限速", "过期时间", "状态", "操作");
-
+    cols.push("流量", "配额", "限制", "过期时间", "状态", "操作");
     u().clear(head);
     u().clear(body);
     head.appendChild(u().el("tr", {}, cols.map(col => u().el("th", {}, col))));
@@ -68,7 +91,6 @@
       ]));
       return;
     }
-
     filtered.forEach(user => body.appendChild(userRow(user, caps)));
   }
 
@@ -76,18 +98,13 @@
     const total = (user.upload || 0) + (user.download || 0);
     const quotaPct = user.quota > 0 ? Math.min(100, total / user.quota * 100) : 0;
     const row = u().el("tr");
-
     row.appendChild(cell("名称", "", user.name || user.id));
     row.appendChild(cell("ID", "mono faint", user.id));
-    if (caps.user_speed) {
-      row.appendChild(cell("速率", "mono", limitInfo([
-        limitRow("upload", u().formatSpeed(user.speed_up)),
-        limitRow("download", u().formatSpeed(user.speed_down))
-      ])));
-    }
+    row.appendChild(cell("核心", "", coreBadge(user)));
+    if (caps.user_speed) row.appendChild(cell("速率", "mono", speedContent(user)));
     row.appendChild(cell("流量", "mono", trafficContent(user, caps)));
     row.appendChild(cell("配额", "", quotaContent(total, user.quota, quotaPct, caps)));
-    row.appendChild(cell("限速", "", limitContent(user, caps)));
+    row.appendChild(cell("限制", "", limitContent(user, caps)));
     row.appendChild(cell("过期时间", "faint", u().formatDate(user.expire_at)));
     row.appendChild(cell("状态", "", statusBadge(user.enabled, "已启用", "已禁用")));
     row.appendChild(cell("操作", "", u().el("div", { class: "actions" }, desktopActions(user, caps))));
@@ -100,6 +117,22 @@
     return u().el("td", attrs, children);
   }
 
+  function coreBadge(user) {
+    const coreID = user.core_id || window.app.defaultCore || "default";
+    const type = user.adapter_type || coreForID(coreID)?.type || "core";
+    return u().el("div", { class: "limit-info" }, [
+      u().el("span", { class: "badge" }, coreID),
+      u().el("span", { class: "faint mono" }, type)
+    ]);
+  }
+
+  function speedContent(user) {
+    return limitInfo([
+      limitRow("upload", u().formatSpeed(user.speed_up)),
+      limitRow("download", u().formatSpeed(user.speed_down))
+    ]);
+  }
+
   function trafficContent(user, caps) {
     if (!caps.query_traffic) return u().el("span", { class: "faint" }, "不支持");
     return limitInfo([
@@ -109,22 +142,16 @@
   }
 
   function quotaContent(total, quota, quotaPct, caps) {
-    if (!caps.query_traffic) return u().el("span", { class: "faint" }, "已禁用");
+    if (!caps.query_traffic) return u().el("span", { class: "faint" }, "未启用");
     if (!(quota > 0)) return u().el("span", { class: "faint" }, "无限制");
-    return [
-      progressBar(quotaPct),
-      u().el("div", { class: "faint mono" }, `${u().formatBytes(total)} / ${u().formatBytes(quota)}`)
-    ];
+    return [progressBar(quotaPct), u().el("div", { class: "faint mono" }, `${u().formatBytes(total)} / ${u().formatBytes(quota)}`)];
   }
 
   function limitContent(user, caps) {
     const upLimit = user.speed_limit_up ? u().formatSpeed(user.speed_limit_up) : "无限制";
     const downLimit = user.speed_limit_down ? u().formatSpeed(user.speed_limit_down) : "无限制";
     return [
-      limitInfo([
-        limitRow("upload", upLimit),
-        limitRow("download", downLimit)
-      ]),
+      limitInfo([limitRow("upload", upLimit), limitRow("download", downLimit)]),
       u().el("div", { class: "badge micro" }, caps.speed_limit ? "原生支持" : "软件监控")
     ];
   }
@@ -134,10 +161,7 @@
   }
 
   function limitRow(kind, value) {
-    return u().el("div", { class: "limit-row" }, [
-      u().svgIcon(ICONS[kind]),
-      ` ${value}`
-    ]);
+    return u().el("div", { class: "limit-row" }, [u().svgIcon(ICONS[kind]), ` ${value}`]);
   }
 
   function progressBar(percent) {
@@ -151,18 +175,12 @@
   }
 
   function desktopActions(user, caps) {
-    const items = [
-      actionButton("edit", user.id, "编辑", "btn ghost icon", "edit")
-    ];
+    const items = [actionButton("edit", user.id, "编辑", "btn ghost icon", "edit")];
     if (caps.disable_user || caps.enable_user) {
       items.push(actionButton("toggle", user.id, user.enabled ? "禁用" : "启用", "btn ghost icon", user.enabled ? "disable" : "enable"));
     }
-    if (caps.subscription) {
-      items.push(actionButton("sub", user.id, "复制订阅链接", "btn ghost icon", "link"));
-    }
-    if (caps.remove_user) {
-      items.push(actionButton("delete", user.id, "删除", "btn danger icon", "delete"));
-    }
+    if (caps.subscription) items.push(actionButton("sub", user.id, "复制订阅链接", "btn ghost icon", "link"));
+    if (caps.remove_user) items.push(actionButton("delete", user.id, "删除", "btn danger icon", "delete"));
     return items;
   }
 
@@ -173,28 +191,21 @@
       type: "button",
       data: { action, id },
       onclick: onAction
-    }, [
-      u().svgIcon(ICONS[iconName]),
-      label ? ` ${label}` : null
-    ]);
+    }, [u().svgIcon(ICONS[iconName]), label ? ` ${label}` : null]);
   }
 
   function renderMobile(filtered, caps) {
     const tablePanel = document.querySelector(".table-panel");
     if (!tablePanel) return;
-
     let mobileList = tablePanel.querySelector(".mobile-user-list");
     if (!mobileList) {
-      mobileList = document.createElement("div");
-      mobileList.className = "mobile-user-list";
+      mobileList = u().el("div", { class: "mobile-user-list" });
       tablePanel.appendChild(mobileList);
     }
-
     const expandedIds = new Set();
     mobileList.querySelectorAll(".m-user-card.expanded").forEach(el => {
       if (el.dataset.uid) expandedIds.add(el.dataset.uid);
     });
-
     u().clear(mobileList);
     if (!filtered.length) {
       mobileList.appendChild(u().el("div", { class: "empty-state" }, "未找到用户。"));
@@ -207,41 +218,31 @@
     const initial = (user.name || user.id || "?").charAt(0).toUpperCase();
     const creds = user.credentials || {};
     const uuid = creds.uuid || creds.password || creds.ss_password || user.id || "";
-    const uuidDisplay = uuid.length > 24 ? `${uuid.slice(0, 12)}…${uuid.slice(-6)}` : uuid;
+    const uuidDisplay = uuid.length > 24 ? `${uuid.slice(0, 12)}...${uuid.slice(-6)}` : uuid;
     const total = (user.upload || 0) + (user.download || 0);
     const quotaPct = user.quota > 0 ? Math.min(100, total / user.quota * 100) : 0;
 
-    const card = u().el("div", {
-      class: `m-user-card${expanded ? " expanded" : ""}`,
-      data: { uid: user.id }
-    });
-
+    const card = u().el("div", { class: `m-user-card${expanded ? " expanded" : ""}`, data: { uid: user.id } });
     const head = u().el("div", { class: "m-user-head" }, [
       u().el("div", { class: "m-user-avatar" }, initial),
       u().el("div", { class: "m-user-info" }, [
-        u().el("div", { class: "m-user-name" }, [
-          user.name || user.id,
-          " ",
-          statusBadge(user.enabled, "启用", "禁用")
-        ]),
-        u().el("div", { class: "m-user-uuid" }, uuidDisplay)
+        u().el("div", { class: "m-user-name" }, [user.name || user.id, " ", statusBadge(user.enabled, "启用", "禁用")]),
+        u().el("div", { class: "m-user-uuid" }, `${uuidDisplay} · ${user.core_id || window.app.defaultCore || "default"}`)
       ]),
       chevronIcon()
     ]);
     head.addEventListener("click", () => card.classList.toggle("expanded"));
-
     const body = u().el("div", { class: "m-user-body" }, [
       u().el("div", { class: "m-user-stats" }, mobileStats(user, caps)),
       caps.query_traffic && user.quota > 0 ? mobileQuota(total, user.quota, quotaPct) : null,
       u().el("div", { class: "m-user-actions" }, mobileActions(user, caps))
     ]);
-
     card.append(head, body);
     return card;
   }
 
   function mobileStats(user, caps) {
-    const stats = [];
+    const stats = [mobileStat("核心", `${user.core_id || window.app.defaultCore || "default"} / ${user.adapter_type || "core"}`)];
     if (caps.query_traffic) {
       stats.push(mobileStat("上传", u().formatBytes(user.upload)));
       stats.push(mobileStat("下载", u().formatBytes(user.download)));
@@ -274,12 +275,8 @@
     if (caps.disable_user || caps.enable_user) {
       items.push(actionButton("toggle", user.id, user.enabled ? "禁用" : "启用", "m-action-btn", user.enabled ? "disable" : "enable", user.enabled ? "禁用" : "启用"));
     }
-    if (caps.subscription) {
-      items.push(actionButton("sub", user.id, "订阅", "m-action-btn", "link", "订阅"));
-    }
-    if (caps.remove_user) {
-      items.push(actionButton("delete", user.id, "删除", "m-action-btn danger", "delete", "删除"));
-    }
+    if (caps.subscription) items.push(actionButton("sub", user.id, "订阅", "m-action-btn", "link", "订阅"));
+    if (caps.remove_user) items.push(actionButton("delete", user.id, "删除", "m-action-btn danger", "delete", "删除"));
     return items;
   }
 
@@ -335,21 +332,24 @@
   }
 
   function openCreate() {
-    const caps = window.app.capabilities;
-    const fields = window.app.credentialFields || [];
-    openModal("创建用户", formHTML({ fields, caps }), async () => {
+    const selectedCore = window.app.defaultCore || availableCores()[0]?.id || "";
+    openModal("创建用户", formNode(selectedCore), async () => {
+      const coreID = value("core");
+      const fields = fieldsForCore(coreID);
+      const caps = capsForCore(coreID);
       const payload = collectForm(fields, caps);
       await window.api.createUser(payload);
       u().toast("用户已创建", "success");
       await refresh(true);
     });
-    wireAutoGenerate(fields);
-    wireDependencies(fields);
+    wireCoreSelector();
+    wireDependencies(fieldsForCore(selectedCore));
+    wireAutoGenerate(fieldsForCore(selectedCore));
   }
 
   function openEdit(user) {
-    const caps = window.app.capabilities;
-    openModal("编辑用户", editHTML(user, caps), async () => {
+    const caps = window.app.capabilities || {};
+    openModal("编辑用户", editNode(user, caps), async () => {
       const payload = {
         name: value("name"),
         quota: toBytes(value("quota"), value("quota_unit")),
@@ -363,9 +363,11 @@
     });
   }
 
-  function formNode({ fields, caps }) {
-    return u().el("div", { class: "form-grid" }, [
+  function formNode(selectedCore) {
+    const caps = capsForCore(selectedCore);
+    return u().el("div", { class: "form-grid", id: "user-form-grid" }, [
       formSection("基础信息", [
+        coreSelect(selectedCore),
         u().el("label", { class: "field full" }, [
           u().el("span", {}, "用户 ID"),
           u().el("input", { id: "field-id", placeholder: "留空则自动生成 UUID 或随机 ID" })
@@ -375,15 +377,30 @@
           u().el("input", { id: "field-name", required: true })
         ])
       ]),
-      formSection("连接凭据", [
-        u().el("div", { class: "form-section-note" }, "按所选协议显示对应字段。"),
-        fields.length ? fields.map(fieldNode) : u().el("div", { class: "hint" }, "当前适配器不需要额外凭据。")
-      ]),
-      formSection("配额与限速", [
-        quotaNodes(),
-        limitNodes(caps),
-        expireField("留空表示永不过期。")
-      ])
+      credentialsSection(selectedCore),
+      formSection("配额与限速", [quotaNodes(), limitNodes(caps), expireField("留空表示永不过期。")])
+    ]);
+  }
+
+  function coreSelect(selectedCore) {
+    const cores = availableCores();
+    return u().el("label", { class: "field full" }, [
+      u().el("span", {}, "归属核心"),
+      u().el("select", { id: "field-core" }, cores.map(core => u().el("option", {
+        value: core.id,
+        selected: core.id === selectedCore
+      }, `${core.id || "default"} · ${core.type || "core"}`))),
+      u().el("span", { class: "hint" }, "用户会写入所选核心；旧后端未返回 cores 时自动使用默认核心。")
+    ]);
+  }
+
+  function credentialsSection(coreID) {
+    const fields = fieldsForCore(coreID);
+    return formSection("连接凭据", [
+      u().el("div", { class: "form-section-note" }, "按所选核心显示对应字段。"),
+      u().el("div", { id: "credential-fields", class: "form-grid nested-fields" },
+        fields.length ? fields.map(fieldNode) : [u().el("div", { class: "hint" }, "当前核心不需要额外凭据。")]
+      )
     ]);
   }
 
@@ -393,6 +410,10 @@
         u().el("label", { class: "field full" }, [
           u().el("span", {}, "名称"),
           u().el("input", { id: "field-name", value: user.name || "" })
+        ]),
+        u().el("div", { class: "field full" }, [
+          u().el("span", {}, "归属核心"),
+          coreBadge(user)
         ])
       ]),
       formSection("配额与限速", [
@@ -411,42 +432,23 @@
   }
 
   function fieldNode(field) {
-    const attrs = {
-      class: "field credential-field",
-      id: `field-container-${field.key}`
-    };
+    const attrs = { class: "field credential-field", id: `field-container-${field.key}` };
     if (field.depends_on_key) {
       attrs["data-depends-key"] = field.depends_on_key;
       attrs["data-depends-val"] = field.depends_on_val;
     }
-
     if (field.type === "select") {
       return u().el("label", attrs, [
         u().el("span", {}, field.label),
         u().el("select", { id: `cred-${field.key}`, required: Boolean(field.required) },
-          (field.options || []).map(opt => u().el("option", {
-            value: opt,
-            selected: opt === field.default
-          }, opt || "(无)"))
+          (field.options || []).map(opt => u().el("option", { value: opt, selected: opt === field.default }, opt || "(无)"))
         )
       ]);
     }
-
-    const inputChildren = [
-      u().el("input", {
-        id: `cred-${field.key}`,
-        value: field.default || "",
-        required: Boolean(field.required)
-      })
-    ];
+    const inputChildren = [u().el("input", { id: `cred-${field.key}`, value: field.default || "", required: Boolean(field.required) })];
     if (field.auto_generate) {
-      inputChildren.push(u().el("button", {
-        class: "btn ghost",
-        type: "button",
-        data: { generate: field.key }
-      }, "生成"));
+      inputChildren.push(u().el("button", { class: "btn ghost", type: "button", data: { generate: field.key } }, "生成"));
     }
-
     return u().el("label", attrs, [
       u().el("span", {}, field.label),
       u().el("div", { class: "input-with-action" }, inputChildren)
@@ -457,14 +459,7 @@
     return [
       u().el("label", { class: "field" }, [
         u().el("span", {}, "流量配额"),
-        u().el("input", {
-          id: "field-quota",
-          type: "number",
-          min: "0",
-          step: "any",
-          value: quota ? quota / 1073741824 : "",
-          placeholder: "0 = 无限制"
-        })
+        u().el("input", { id: "field-quota", type: "number", min: "0", step: "any", value: quota ? quota / 1073741824 : "", placeholder: "0 = 无限制" })
       ]),
       u().el("label", { class: "field" }, [
         u().el("span", {}, "配额单位"),
@@ -477,29 +472,15 @@
   }
 
   function limitNodes(caps, user = {}) {
-    const hint = caps.speed_limit ? "底层适配器提供原生限速。" : "适配器暂无原生限速；由系统监控在软件层面执行限速。";
+    const hint = caps.speed_limit ? "底层核心提供原生限速。" : "当前核心暂无原生限速；由系统监控在软件层执行。";
     return [
       u().el("label", { class: "field" }, [
         u().el("span", {}, "上传限速"),
-        u().el("input", {
-          id: "field-limit_up",
-          type: "number",
-          min: "0",
-          step: "any",
-          value: user.speed_limit_up ? user.speed_limit_up / 1048576 : "",
-          placeholder: "0 = 无限制"
-        })
+        u().el("input", { id: "field-limit_up", type: "number", min: "0", step: "any", value: user.speed_limit_up ? user.speed_limit_up / 1048576 : "", placeholder: "0 = 无限制" })
       ]),
       u().el("label", { class: "field" }, [
         u().el("span", {}, "下载限速"),
-        u().el("input", {
-          id: "field-limit_down",
-          type: "number",
-          min: "0",
-          step: "any",
-          value: user.speed_limit_down ? user.speed_limit_down / 1048576 : "",
-          placeholder: "0 = 无限制"
-        })
+        u().el("input", { id: "field-limit_down", type: "number", min: "0", step: "any", value: user.speed_limit_down ? user.speed_limit_down / 1048576 : "", placeholder: "0 = 无限制" })
       ]),
       u().el("label", { class: "field" }, [
         u().el("span", {}, "上传限速单位"),
@@ -528,21 +509,11 @@
     ]);
   }
 
-  function formHTML({ fields, caps }) {
-    return formNode({ fields, caps });
-  }
-
-  function editHTML(user, caps) {
-    return editNode(user, caps);
-  }
-
-  function collectForm(fields, caps) {
+  function collectForm(fields) {
     const credentials = {};
     fields.forEach(field => {
       const container = document.getElementById(`field-container-${field.key}`);
-      if (container && container.classList.contains("hidden")) {
-        return;
-      }
+      if (container && container.classList.contains("hidden")) return;
       const raw = document.getElementById(`cred-${field.key}`)?.value?.trim() || "";
       if (field.required && !raw) throw new Error(`${field.label} 为必填项`);
       if (raw) credentials[field.key] = raw;
@@ -550,6 +521,7 @@
     return {
       id: value("id"),
       name: value("name"),
+      core_id: value("core"),
       credentials,
       quota: toBytes(value("quota"), value("quota_unit")),
       speed_limit_up: toBPS(value("limit_up"), value("limit_unit_up")),
@@ -567,7 +539,7 @@
     const modal = u().el("div", { class: "modal", role: "dialog", "aria-modal": "true", "aria-labelledby": "modal-title" }, [
       u().el("div", { class: "modal-header" }, [
         u().el("h3", { id: "modal-title" }, title),
-        u().el("button", { class: "btn ghost icon", type: "button", "aria-label": "关闭", onclick: hideModal }, "×")
+        u().el("button", { class: "btn ghost icon", type: "button", "aria-label": "关闭", onclick: hideModal }, "x")
       ]),
       bodyNode,
       u().el("div", { class: "modal-footer" }, [
@@ -596,38 +568,24 @@
     return new Promise(resolve => {
       u().clear(root);
       const input = confirmText ? u().el("input", { type: "text", autocomplete: "off" }) : null;
-      const submit = u().el("button", {
-        class: danger ? "btn danger" : "btn primary",
-        type: "button",
-        disabled: Boolean(confirmText)
-      }, submitLabel);
-
-      if (input) {
-        input.addEventListener("input", () => {
-          submit.disabled = input.value !== confirmText;
-        });
-      }
-
+      const submit = u().el("button", { class: danger ? "btn danger" : "btn primary", type: "button", disabled: Boolean(confirmText) }, submitLabel);
+      if (input) input.addEventListener("input", () => { submit.disabled = input.value !== confirmText; });
       const finish = result => {
         hideModal();
         resolve(result);
       };
       submit.addEventListener("click", () => finish(true));
-
-      const bodyChildren = [
-        u().el("p", { class: "hint" }, message)
-      ];
+      const bodyChildren = [u().el("p", { class: "hint" }, message)];
       if (input) {
         bodyChildren.push(u().el("label", { class: "field full" }, [
           u().el("span", {}, `输入 ${confirmText} 确认`),
           input
         ]));
       }
-
       const modal = u().el("div", { class: "modal", role: "dialog", "aria-modal": "true", "aria-labelledby": "modal-title" }, [
         u().el("div", { class: "modal-header" }, [
           u().el("h3", { id: "modal-title" }, title),
-          u().el("button", { class: "btn ghost icon", type: "button", "aria-label": "关闭", onclick: () => finish(false) }, "×")
+          u().el("button", { class: "btn ghost icon", type: "button", "aria-label": "关闭", onclick: () => finish(false) }, "x")
         ]),
         u().el("div", { class: "modal-body" }, bodyChildren),
         u().el("div", { class: "modal-footer" }, [
@@ -635,7 +593,6 @@
           submit
         ])
       ]);
-
       root.appendChild(modal);
       root.classList.remove("hidden");
       document.body.classList.add("modal-open");
@@ -659,6 +616,19 @@
     u().clear(root);
   }
 
+  function wireCoreSelector() {
+    const select = document.getElementById("field-core");
+    const credentials = document.getElementById("credential-fields");
+    if (!select || !credentials) return;
+    select.addEventListener("change", () => {
+      const fields = fieldsForCore(select.value);
+      u().clear(credentials);
+      u().append(credentials, fields.length ? fields.map(fieldNode) : [u().el("div", { class: "hint" }, "当前核心不需要额外凭据。")]);
+      wireAutoGenerate(fields);
+      wireDependencies(fields);
+    });
+  }
+
   function wireAutoGenerate(fields) {
     fields.forEach(field => {
       if (!field.auto_generate) return;
@@ -671,55 +641,44 @@
 
   function wireDependencies(fields) {
     const depSources = new Set(fields.filter(f => f.depends_on_key).map(f => f.depends_on_key));
-
     const updateVisibility = () => {
       fields.forEach(field => {
         if (!field.depends_on_key) return;
         const container = document.getElementById(`field-container-${field.key}`);
         const sourceInput = document.getElementById(`cred-${field.depends_on_key}`);
         if (!container || !sourceInput) return;
-
         const allowed = field.depends_on_val ? field.depends_on_val.split(",").map(item => item.trim()) : [];
         const isMatch = allowed.includes(sourceInput.value);
         container.classList.toggle("hidden", !isMatch);
-        container.dataset.dependencyActive = isMatch ? "true" : "false";
-
         const input = document.getElementById(`cred-${field.key}`);
-        if (input) {
-          if (isMatch) {
-            if (field.required) input.setAttribute("required", "");
-          } else {
-            input.removeAttribute("required");
-            if (input.tagName === "SELECT") {
-              input.selectedIndex = 0;
-            } else {
-              input.value = "";
-            }
-          }
+        if (!input) return;
+        if (isMatch && field.required) input.setAttribute("required", "");
+        if (!isMatch) {
+          input.removeAttribute("required");
+          if (input.tagName === "SELECT") input.selectedIndex = 0;
+          else input.value = "";
         }
       });
     };
-
-    depSources.forEach(key => {
-      const el = document.getElementById(`cred-${key}`);
-      el?.addEventListener("change", updateVisibility);
-    });
-
+    depSources.forEach(key => document.getElementById(`cred-${key}`)?.addEventListener("change", updateVisibility));
     updateVisibility();
   }
 
   function value(id) {
     return document.getElementById(`field-${id}`)?.value?.trim() || "";
   }
+
   function dateValue(id) {
     const raw = value(id);
     return raw ? new Date(`${raw}T00:00:00`).toISOString() : null;
   }
+
   function toBytes(raw, unit) {
     const n = Number(raw);
     if (!n || n < 0) return 0;
     return Math.round(n * (unit === "tb" ? 1099511627776 : 1073741824));
   }
+
   function toBPS(raw, unit) {
     const n = Number(raw);
     if (!n || n < 0) return 0;
@@ -742,12 +701,10 @@
     timer = setInterval(() => refresh(true), 5000);
   }
 
-  let lastMobile = null;
   function onResize() {
     const mobile = isMobile();
     if (lastMobile !== null && mobile !== lastMobile) {
-      const mobileList = document.querySelector(".mobile-user-list");
-      if (mobileList) mobileList.remove();
+      document.querySelector(".mobile-user-list")?.remove();
       render();
     }
     lastMobile = mobile;

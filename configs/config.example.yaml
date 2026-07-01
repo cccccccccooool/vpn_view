@@ -1,5 +1,9 @@
 server:
   listen: "0.0.0.0:19463"
+  tls:
+    enabled: false
+    cert_file: ""
+    key_file: ""
 
 auth:
   secret: "change-this-secret"
@@ -54,6 +58,26 @@ cores:
   #       subscription_type: "tcp"
   #       subscription_tls: true
 
+  # Example Xray-core / V2Ray-core core (config_patch mode; aliases: xray-core / v2ray / v2ray-core / v2fly):
+  # default: "xray-main"
+  # enabled: ["xray-main"]
+  # items:
+  #   xray-main:
+  #     type: "xray"                # 或 "v2ray"，仅影响 gRPC 统计服务包路径与展示名
+  #     enabled: true
+  #     role: "primary"
+  #     config:
+  #       xray_config_path: "/etc/xray/config.json"
+  #       config_template_path: "/etc/xray/config.template.json"
+  #       inbound_tag: "vless-in"          # 可选：只管理该 tag 的 inbound，留空则管理全部受支持协议
+  #       reload_command: "systemctl reload xray"
+  #       api_address: "127.0.0.1:10085"   # Xray/V2Ray 内置 Stats gRPC API，留空则关闭流量统计能力
+  #       # stats_query_method: ""          # 可选：显式覆盖 QueryStats gRPC 全路径，默认按 type 自动推导
+  #       subscription_domain: "vpn.example.com"
+  #       subscription_port: 443
+  #       subscription_type: "tcp"
+  #       subscription_tls: true
+
 store:
   sqlite:
     path: "./data/vpnview.db"
@@ -65,6 +89,13 @@ limits:
   default_user_download_speed: 0
   default_quota: 0
   software_limit_strikes: 3
+
+security:
+  csp: "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'"
+  hsts_enabled: true
+  hsts_max_age: 31536000
+  hsts_include_subdomains: true
+  hsts_preload: false
 
 subscription:
   mode: "link"
@@ -78,5 +109,11 @@ subscription:
 #  record_id: "cloudflare-record-id"
 #  api_token: "cloudflare-api-token"
 #  check_interval: "5m"
+#  record_type: "A"
+#  ttl: 1
+#  proxied: false
+#  ip_check_urls:
+#    - "https://api.ipify.org"
+#    - "https://ifconfig.me/ip"
 
 poll_interval: "5s"

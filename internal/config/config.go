@@ -1,6 +1,7 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"sort"
@@ -10,6 +11,8 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+var ErrMissingTLSFiles = errors.New("server.tls.enabled requires both cert_file and key_file")
+
 // Config is the top-level YAML configuration.
 type Config struct {
 	Server       ServerConfig       `yaml:"server"`
@@ -18,13 +21,21 @@ type Config struct {
 	Cores        CoreConfig         `yaml:"cores"`
 	Store        StoreConfig        `yaml:"store"`
 	Limits       LimitsConfig       `yaml:"limits"`
+	Security     SecurityConfig     `yaml:"security"`
 	Subscription SubscriptionConfig `yaml:"subscription"`
 	DDNS         *DDNSConfig        `yaml:"ddns,omitempty"`
 	PollInterval string             `yaml:"poll_interval"`
 }
 
 type ServerConfig struct {
-	Listen string `yaml:"listen"`
+	Listen string          `yaml:"listen"`
+	TLS    ServerTLSConfig `yaml:"tls"`
+}
+
+type ServerTLSConfig struct {
+	Enabled  bool   `yaml:"enabled"`
+	CertFile string `yaml:"cert_file"`
+	KeyFile  string `yaml:"key_file"`
 }
 
 type AuthConfig struct {
@@ -64,6 +75,14 @@ type LimitsConfig struct {
 	SoftwareLimitStrikes     int   `yaml:"software_limit_strikes"`
 }
 
+type SecurityConfig struct {
+	CSP                   string `yaml:"csp"`
+	HSTSEnabled           bool   `yaml:"hsts_enabled"`
+	HSTSMaxAge            int    `yaml:"hsts_max_age"`
+	HSTSIncludeSubDomains bool   `yaml:"hsts_include_subdomains"`
+	HSTSPreload           bool   `yaml:"hsts_preload"`
+}
+
 type SubscriptionConfig struct {
 	Mode         string `yaml:"mode"`
 	Domain       string `yaml:"domain"`
@@ -71,12 +90,16 @@ type SubscriptionConfig struct {
 }
 
 type DDNSConfig struct {
-	Provider      string `yaml:"provider"`
-	Domain        string `yaml:"domain"`
-	ZoneID        string `yaml:"zone_id"`
-	RecordID      string `yaml:"record_id"`
-	APIToken      string `yaml:"api_token"`
-	CheckInterval string `yaml:"check_interval"`
+	Provider      string   `yaml:"provider"`
+	Domain        string   `yaml:"domain"`
+	ZoneID        string   `yaml:"zone_id"`
+	RecordID      string   `yaml:"record_id"`
+	APIToken      string   `yaml:"api_token"`
+	CheckInterval string   `yaml:"check_interval"`
+	RecordType    string   `yaml:"record_type"`
+	Proxied       bool     `yaml:"proxied"`
+	TTL           int      `yaml:"ttl"`
+	IPCheckURLs   []string `yaml:"ip_check_urls"`
 }
 
 func Load(path string) (*Config, error) {
@@ -117,6 +140,8 @@ func (c *Config) applyDefaults() {
 	if c.Limits.SoftwareLimitStrikes <= 0 {
 		c.Limits.SoftwareLimitStrikes = 3
 	}
+	c.normalizeSecurity()
+	c.normalizeDDNS()
 	c.normalizeCores()
 }
 
@@ -144,6 +169,35 @@ func parseDuration(raw string, fallback time.Duration) time.Duration {
 		return fallback
 	}
 	return d
+}
+
+func (c *Config) normalizeSecurity() {
+	if c.Security.CSP == "" {
+		c.Security.CSP = "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'"
+	}
+	if c.Security.HSTSMaxAge <= 0 {
+		c.Security.HSTSMaxAge = 31536000
+	}
+}
+
+func (c *Config) normalizeDDNS() {
+	if c.DDNS == nil {
+		return
+	}
+	c.DDNS.Provider = strings.TrimSpace(strings.ToLower(c.DDNS.Provider))
+	c.DDNS.RecordType = strings.ToUpper(strings.TrimSpace(c.DDNS.RecordType))
+	if c.DDNS.RecordType == "" {
+		c.DDNS.RecordType = "A"
+	}
+	if c.DDNS.TTL <= 0 {
+		c.DDNS.TTL = 1
+	}
+	if len(c.DDNS.IPCheckURLs) == 0 {
+		c.DDNS.IPCheckURLs = []string{
+			"https://api.ipify.org",
+			"https://ifconfig.me/ip",
+		}
+	}
 }
 
 func (c *Config) normalizeCores() {

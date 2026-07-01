@@ -1,10 +1,12 @@
 package handler
 
 import (
+	"fmt"
 	"net/http"
 	"strings"
 
 	"vpnview/internal/auth"
+	"vpnview/internal/config"
 )
 
 const (
@@ -60,19 +62,30 @@ func CSRFMiddleware(next http.Handler) http.Handler {
 	})
 }
 
-func SecurityHeadersMiddleware(next http.Handler) http.Handler {
+func SecurityHeadersMiddleware(sec config.SecurityConfig, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		h := w.Header()
-		h.Set("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'")
+		h.Set("Content-Security-Policy", sec.CSP)
 		h.Set("X-Content-Type-Options", "nosniff")
 		h.Set("Referrer-Policy", "no-referrer")
 		h.Set("Permissions-Policy", "clipboard-read=(), geolocation=(), microphone=(), camera=()")
 		h.Set("X-Frame-Options", "DENY")
-		if r.TLS != nil {
-			h.Set("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+		if r.TLS != nil && sec.HSTSEnabled {
+			h.Set("Strict-Transport-Security", hstsValue(sec))
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+func hstsValue(sec config.SecurityConfig) string {
+	parts := []string{fmt.Sprintf("max-age=%d", sec.HSTSMaxAge)}
+	if sec.HSTSIncludeSubDomains {
+		parts = append(parts, "includeSubDomains")
+	}
+	if sec.HSTSPreload {
+		parts = append(parts, "preload")
+	}
+	return strings.Join(parts, "; ")
 }
 
 func IPBlockMiddleware(blocker *auth.IPBlocker, next http.Handler) http.Handler {

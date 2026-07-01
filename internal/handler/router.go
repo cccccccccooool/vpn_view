@@ -60,7 +60,7 @@ func NewRouter(
 	})
 	mux.Handle("/", spaFileServer(webFS))
 
-	return SecurityHeadersMiddleware(IPBlockMiddleware(blocker, CSRFMiddleware(JWTMiddleware(authSvc, mux))))
+	return SecurityHeadersMiddleware(cfg.Security, IPBlockMiddleware(blocker, CSRFMiddleware(JWTMiddleware(authSvc, mux))))
 }
 
 func notSupported(w http.ResponseWriter, r *http.Request) {

@@ -2,6 +2,8 @@
   const app = {
     capabilities: {},
     credentialFields: [],
+    cores: [],
+    defaultCore: "",
     capsPayload: null,
 
     async init() {
@@ -26,6 +28,8 @@
       this.capsPayload = await window.api.capabilities();
       this.capabilities = this.capsPayload.capabilities || {};
       this.credentialFields = this.capsPayload.credential_fields || [];
+      this.cores = this.capsPayload.cores || [];
+      this.defaultCore = this.capsPayload.default_core || "";
       this.applyCapabilities();
     },
 
