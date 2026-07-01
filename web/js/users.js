@@ -5,6 +5,16 @@
   let search = "";
   let bound = false;
 
+  const ICONS = {
+    edit: "M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zM20.71 7.04c.39-.39.39-1.02 0-1.41l-2.34-2.34a.9959.9959 0 0 0-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z",
+    disable: "M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm5 11H7v-2h10v2z",
+    enable: "M8 5v14l11-7z",
+    link: "M3.9 12c0-1.71 1.39-3.1 3.1-3.1h4V7H7c-2.76 0-5 2.24-5 5s2.24 5 5 5h4v-1.9H7c-1.71 0-3.1-1.39-3.1-3.1zM8 13h8v-2H8v2zm9-6h-4v1.9h4c1.71 0 3.1 1.39 3.1 3.1s-1.39 3.1-3.1 3.1h-4V17h4c2.76 0 5-2.24 5-5s-2.24-5-5-5z",
+    delete: "M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z",
+    upload: "M4 12l1.41 1.41L11 7.83V20h2V7.83l5.58 5.59L20 12l-8-8-8 8z",
+    download: "M20 12l-1.41-1.41L13 16.17V4h-2v12.17l-5.58-5.59L4 12l8 8 8-8z"
+  };
+
   async function refresh(silent = false) {
     try {
       const payload = await window.api.users();
@@ -36,110 +46,143 @@
     }
   }
 
-  /* ============================================================
-     DESKTOP: classic table rendering (unchanged logic)
-     ============================================================ */
   function renderDesktop(filtered, caps) {
     const head = document.getElementById("users-head");
     const body = document.getElementById("users-body");
     if (!head || !body) return;
 
-    // Remove mobile list if it exists
     const mobileList = document.querySelector(".mobile-user-list");
     if (mobileList) mobileList.remove();
 
     const cols = ["名称", "ID"];
     if (caps.user_speed) cols.push("速率");
     cols.push("流量", "配额", "限速", "过期时间", "状态", "操作");
-    head.innerHTML = `<tr>${cols.map(col => `<th>${col}</th>`).join("")}</tr>`;
+
+    u().clear(head);
+    u().clear(body);
+    head.appendChild(u().el("tr", {}, cols.map(col => u().el("th", {}, col))));
 
     if (!filtered.length) {
-      body.innerHTML = `<tr><td colspan="99" class="empty-state">未找到用户。</td></tr>`;
+      body.appendChild(u().el("tr", {}, [
+        u().el("td", { colspan: "99", class: "empty-state" }, "未找到用户。")
+      ]));
       return;
     }
-    body.innerHTML = filtered.map(user => row(user, caps)).join("");
-    body.querySelectorAll("[data-action]").forEach(btn => btn.addEventListener("click", onAction));
+
+    filtered.forEach(user => body.appendChild(userRow(user, caps)));
   }
 
-  function row(user, caps) {
+  function userRow(user, caps) {
     const total = (user.upload || 0) + (user.download || 0);
     const quotaPct = user.quota > 0 ? Math.min(100, total / user.quota * 100) : 0;
-    const status = user.enabled
-      ? `<span class="badge ok">已启用</span>`
-      : `<span class="badge bad">已禁用</span>`;
-    const traffic = caps.query_traffic
-      ? `<div class="limit-info">
-          <div class="limit-row"><svg viewBox="0 0 24 24"><path d="M4 12l1.41 1.41L11 7.83V20h2V7.83l5.58 5.59L20 12l-8-8-8 8z"/></svg> ${u().formatBytes(user.upload)}</div>
-          <div class="limit-row"><svg viewBox="0 0 24 24"><path d="M20 12l-1.41-1.41L13 16.17V4h-2v12.17l-5.58-5.59L4 12l8 8 8-8z"/></svg> ${u().formatBytes(user.download)}</div>
-         </div>`
-      : `<span class="faint">不支持</span>`;
-    const quota = caps.query_traffic
-      ? user.quota > 0
-        ? `<div class="progress"><span style="width:${quotaPct}%"></span></div><div class="faint mono" style="font-size:12px;">${u().formatBytes(total)} / ${u().formatBytes(user.quota)}</div>`
-        : `<span class="faint">无限制</span>`
-      : `<span class="faint">已禁用</span>`;
-    const speed = caps.user_speed
-      ? `<td class="mono" data-label="速率">
-          <div class="limit-info">
-            <div class="limit-row"><svg viewBox="0 0 24 24"><path d="M4 12l1.41 1.41L11 7.83V20h2V7.83l5.58 5.59L20 12l-8-8-8 8z"/></svg> ${u().formatSpeed(user.speed_up)}</div>
-            <div class="limit-row"><svg viewBox="0 0 24 24"><path d="M20 12l-1.41-1.41L13 16.17V4h-2v12.17l-5.58-5.59L4 12l8 8 8-8z"/></svg> ${u().formatSpeed(user.speed_down)}</div>
-          </div>
-         </td>`
-      : "";
-    const limitHint = caps.speed_limit ? "原生支持" : "软件监控";
+    const row = u().el("tr");
+
+    row.appendChild(cell("名称", "", user.name || user.id));
+    row.appendChild(cell("ID", "mono faint", user.id));
+    if (caps.user_speed) {
+      row.appendChild(cell("速率", "mono", limitInfo([
+        limitRow("upload", u().formatSpeed(user.speed_up)),
+        limitRow("download", u().formatSpeed(user.speed_down))
+      ])));
+    }
+    row.appendChild(cell("流量", "mono", trafficContent(user, caps)));
+    row.appendChild(cell("配额", "", quotaContent(total, user.quota, quotaPct, caps)));
+    row.appendChild(cell("限速", "", limitContent(user, caps)));
+    row.appendChild(cell("过期时间", "faint", u().formatDate(user.expire_at)));
+    row.appendChild(cell("状态", "", statusBadge(user.enabled, "已启用", "已禁用")));
+    row.appendChild(cell("操作", "", u().el("div", { class: "actions" }, desktopActions(user, caps))));
+    return row;
+  }
+
+  function cell(label, className, children) {
+    const attrs = { "data-label": label };
+    if (className) attrs.class = className;
+    return u().el("td", attrs, children);
+  }
+
+  function trafficContent(user, caps) {
+    if (!caps.query_traffic) return u().el("span", { class: "faint" }, "不支持");
+    return limitInfo([
+      limitRow("upload", u().formatBytes(user.upload)),
+      limitRow("download", u().formatBytes(user.download))
+    ]);
+  }
+
+  function quotaContent(total, quota, quotaPct, caps) {
+    if (!caps.query_traffic) return u().el("span", { class: "faint" }, "已禁用");
+    if (!(quota > 0)) return u().el("span", { class: "faint" }, "无限制");
+    return [
+      progressBar(quotaPct),
+      u().el("div", { class: "faint mono" }, `${u().formatBytes(total)} / ${u().formatBytes(quota)}`)
+    ];
+  }
+
+  function limitContent(user, caps) {
     const upLimit = user.speed_limit_up ? u().formatSpeed(user.speed_limit_up) : "无限制";
     const downLimit = user.speed_limit_down ? u().formatSpeed(user.speed_limit_down) : "无限制";
-    const limit = `<div class="limit-info mono">
-        <div class="limit-row"><svg viewBox="0 0 24 24"><path d="M4 12l1.41 1.41L11 7.83V20h2V7.83l5.58 5.59L20 12l-8-8-8 8z"/></svg> ${upLimit}</div>
-        <div class="limit-row"><svg viewBox="0 0 24 24"><path d="M20 12l-1.41-1.41L13 16.17V4h-2v12.17l-5.58-5.59L4 12l8 8 8-8z"/></svg> ${downLimit}</div>
-      </div>
-      <div class="badge micro">${limitHint}</div>`;
+    return [
+      limitInfo([
+        limitRow("upload", upLimit),
+        limitRow("download", downLimit)
+      ]),
+      u().el("div", { class: "badge micro" }, caps.speed_limit ? "原生支持" : "软件监控")
+    ];
+  }
 
-    return `<tr>
-      <td data-label="名称" style="font-weight:500;">${u().escapeHtml(user.name || user.id)}</td>
-      <td data-label="ID" class="mono faint">${u().escapeHtml(user.id)}</td>
-      ${speed}
-      <td data-label="流量" class="mono">${traffic}</td>
-      <td data-label="配额">${quota}</td>
-      <td data-label="限速">${limit}</td>
-      <td data-label="过期时间" class="faint">${u().escapeHtml(u().formatDate(user.expire_at))}</td>
-      <td data-label="状态">${status}</td>
-      <td data-label="操作"><div class="actions">${desktopActions(user, caps)}</div></td>
-    </tr>`;
+  function limitInfo(children) {
+    return u().el("div", { class: "limit-info" }, children);
+  }
+
+  function limitRow(kind, value) {
+    return u().el("div", { class: "limit-row" }, [
+      u().svgIcon(ICONS[kind]),
+      ` ${value}`
+    ]);
+  }
+
+  function progressBar(percent) {
+    const span = u().el("span");
+    u().setProgressWidth(span, percent);
+    return u().el("div", { class: "progress" }, span);
+  }
+
+  function statusBadge(enabled, okText, badText) {
+    return u().el("span", { class: `badge ${enabled ? "ok" : "bad"}` }, enabled ? okText : badText);
   }
 
   function desktopActions(user, caps) {
-    const iconEdit = `<svg viewBox="0 0 24 24"><path d="M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zM20.71 7.04c.39-.39.39-1.02 0-1.41l-2.34-2.34a.9959.9959 0 0 0-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z"/></svg>`;
-    const iconDisable = `<svg viewBox="0 0 24 24"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm5 11H7v-2h10v2z"/></svg>`;
-    const iconEnable = `<svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>`;
-    const iconLink = `<svg viewBox="0 0 24 24"><path d="M3.9 12c0-1.71 1.39-3.1 3.1-3.1h4V7H7c-2.76 0-5 2.24-5 5s2.24 5 5 5h4v-1.9H7c-1.71 0-3.1-1.39-3.1-3.1zM8 13h8v-2H8v2zm9-6h-4v1.9h4c1.71 0 3.1 1.39 3.1 3.1s-1.39 3.1-3.1 3.1h-4V17h4c2.76 0 5-2.24 5-5s-2.24-5-5-5z"/></svg>`;
-    const iconDelete = `<svg viewBox="0 0 24 24"><path d="M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z"/></svg>`;
-    
     const items = [
-      `<button class="btn ghost icon" title="编辑" data-action="edit" data-id="${u().escapeHtml(user.id)}">${iconEdit}</button>`
+      actionButton("edit", user.id, "编辑", "btn ghost icon", "edit")
     ];
     if (caps.disable_user || caps.enable_user) {
-      const icon = user.enabled ? iconDisable : iconEnable;
-      const title = user.enabled ? "禁用" : "启用";
-      items.push(`<button class="btn ghost icon" title="${title}" data-action="toggle" data-id="${u().escapeHtml(user.id)}">${icon}</button>`);
+      items.push(actionButton("toggle", user.id, user.enabled ? "禁用" : "启用", "btn ghost icon", user.enabled ? "disable" : "enable"));
     }
     if (caps.subscription) {
-      items.push(`<button class="btn ghost icon" title="复制订阅链接" data-action="sub" data-id="${u().escapeHtml(user.id)}">${iconLink}</button>`);
+      items.push(actionButton("sub", user.id, "复制订阅链接", "btn ghost icon", "link"));
     }
     if (caps.remove_user) {
-      items.push(`<button class="btn danger icon" title="删除" data-action="delete" data-id="${u().escapeHtml(user.id)}">${iconDelete}</button>`);
+      items.push(actionButton("delete", user.id, "删除", "btn danger icon", "delete"));
     }
-    return items.join("");
+    return items;
   }
 
-  /* ============================================================
-     MOBILE: compact card with tap-to-expand in-place actions
-     ============================================================ */
+  function actionButton(action, id, title, className, iconName, label = "") {
+    return u().el("button", {
+      class: className,
+      title,
+      type: "button",
+      data: { action, id },
+      onclick: onAction
+    }, [
+      u().svgIcon(ICONS[iconName]),
+      label ? ` ${label}` : null
+    ]);
+  }
+
   function renderMobile(filtered, caps) {
     const tablePanel = document.querySelector(".table-panel");
     if (!tablePanel) return;
 
-    // Reuse or create mobile list container (sibling to table-scroll)
     let mobileList = tablePanel.querySelector(".mobile-user-list");
     if (!mobileList) {
       mobileList = document.createElement("div");
@@ -147,112 +190,115 @@
       tablePanel.appendChild(mobileList);
     }
 
-    if (!filtered.length) {
-      mobileList.innerHTML = `<div class="empty-state">未找到用户。</div>`;
-      return;
-    }
-
-    // Preserve expanded state
     const expandedIds = new Set();
     mobileList.querySelectorAll(".m-user-card.expanded").forEach(el => {
       if (el.dataset.uid) expandedIds.add(el.dataset.uid);
     });
 
-    mobileList.innerHTML = filtered.map(user => mobileCard(user, caps, expandedIds.has(user.id))).join("");
-
-    // Bind card head tap => toggle expand
-    mobileList.querySelectorAll(".m-user-head").forEach(head => {
-      head.addEventListener("click", () => {
-        const card = head.closest(".m-user-card");
-        card.classList.toggle("expanded");
-      });
-    });
-
-    // Bind action buttons
-    mobileList.querySelectorAll("[data-action]").forEach(btn => btn.addEventListener("click", onAction));
+    u().clear(mobileList);
+    if (!filtered.length) {
+      mobileList.appendChild(u().el("div", { class: "empty-state" }, "未找到用户。"));
+      return;
+    }
+    filtered.forEach(user => mobileList.appendChild(mobileCard(user, caps, expandedIds.has(user.id))));
   }
 
   function mobileCard(user, caps, expanded) {
-    const esc = u().escapeHtml;
     const initial = (user.name || user.id || "?").charAt(0).toUpperCase();
-    const statusBadge = user.enabled
-      ? `<span class="badge ok" style="font-size:11px;padding:2px 8px;">启用</span>`
-      : `<span class="badge bad" style="font-size:11px;padding:2px 8px;">禁用</span>`;
-
-    // Credential UUID display
     const creds = user.credentials || {};
     const uuid = creds.uuid || creds.password || creds.ss_password || user.id || "";
-    const uuidDisplay = uuid.length > 24 ? uuid.slice(0, 12) + "…" + uuid.slice(-6) : uuid;
-
-    // Stats
+    const uuidDisplay = uuid.length > 24 ? `${uuid.slice(0, 12)}…${uuid.slice(-6)}` : uuid;
     const total = (user.upload || 0) + (user.download || 0);
     const quotaPct = user.quota > 0 ? Math.min(100, total / user.quota * 100) : 0;
 
-    // Stat cells
-    let statsHTML = "";
+    const card = u().el("div", {
+      class: `m-user-card${expanded ? " expanded" : ""}`,
+      data: { uid: user.id }
+    });
+
+    const head = u().el("div", { class: "m-user-head" }, [
+      u().el("div", { class: "m-user-avatar" }, initial),
+      u().el("div", { class: "m-user-info" }, [
+        u().el("div", { class: "m-user-name" }, [
+          user.name || user.id,
+          " ",
+          statusBadge(user.enabled, "启用", "禁用")
+        ]),
+        u().el("div", { class: "m-user-uuid" }, uuidDisplay)
+      ]),
+      chevronIcon()
+    ]);
+    head.addEventListener("click", () => card.classList.toggle("expanded"));
+
+    const body = u().el("div", { class: "m-user-body" }, [
+      u().el("div", { class: "m-user-stats" }, mobileStats(user, caps)),
+      caps.query_traffic && user.quota > 0 ? mobileQuota(total, user.quota, quotaPct) : null,
+      u().el("div", { class: "m-user-actions" }, mobileActions(user, caps))
+    ]);
+
+    card.append(head, body);
+    return card;
+  }
+
+  function mobileStats(user, caps) {
+    const stats = [];
     if (caps.query_traffic) {
-      statsHTML += `
-        <div class="m-user-stat"><div class="m-user-stat-label">上传</div><div class="m-user-stat-value">${u().formatBytes(user.upload)}</div></div>
-        <div class="m-user-stat"><div class="m-user-stat-label">下载</div><div class="m-user-stat-value">${u().formatBytes(user.download)}</div></div>`;
+      stats.push(mobileStat("上传", u().formatBytes(user.upload)));
+      stats.push(mobileStat("下载", u().formatBytes(user.download)));
     }
     if (caps.user_speed) {
-      statsHTML += `
-        <div class="m-user-stat"><div class="m-user-stat-label">上传速率</div><div class="m-user-stat-value">${u().formatSpeed(user.speed_up)}</div></div>
-        <div class="m-user-stat"><div class="m-user-stat-label">下载速率</div><div class="m-user-stat-value">${u().formatSpeed(user.speed_down)}</div></div>`;
+      stats.push(mobileStat("上传速率", u().formatSpeed(user.speed_up)));
+      stats.push(mobileStat("下载速率", u().formatSpeed(user.speed_down)));
     }
-    statsHTML += `
-      <div class="m-user-stat"><div class="m-user-stat-label">过期时间</div><div class="m-user-stat-value">${esc(u().formatDate(user.expire_at))}</div></div>
-      <div class="m-user-stat"><div class="m-user-stat-label">限速</div><div class="m-user-stat-value">${user.speed_limit_up ? u().formatSpeed(user.speed_limit_up) : "无限"} / ${user.speed_limit_down ? u().formatSpeed(user.speed_limit_down) : "无限"}</div></div>`;
+    stats.push(mobileStat("过期时间", u().formatDate(user.expire_at)));
+    stats.push(mobileStat("限速", `${user.speed_limit_up ? u().formatSpeed(user.speed_limit_up) : "无限"} / ${user.speed_limit_down ? u().formatSpeed(user.speed_limit_down) : "无限"}`));
+    return stats;
+  }
 
-    // Quota bar
-    let quotaHTML = "";
-    if (caps.query_traffic && user.quota > 0) {
-      quotaHTML = `<div class="m-quota-bar">
-        <div class="progress"><span style="width:${quotaPct}%"></span></div>
-        <div class="m-quota-text">${u().formatBytes(total)} / ${u().formatBytes(user.quota)}</div>
-      </div>`;
-    }
+  function mobileStat(label, value) {
+    return u().el("div", { class: "m-user-stat" }, [
+      u().el("div", { class: "m-user-stat-label" }, label),
+      u().el("div", { class: "m-user-stat-value" }, value)
+    ]);
+  }
 
-    // Action buttons (in-place, not a popup)
-    const iconEdit = `<svg viewBox="0 0 24 24"><path d="M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zM20.71 7.04c.39-.39.39-1.02 0-1.41l-2.34-2.34a.9959.9959 0 0 0-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z"/></svg>`;
-    const iconDisable = `<svg viewBox="0 0 24 24"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm5 11H7v-2h10v2z"/></svg>`;
-    const iconEnable = `<svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>`;
-    const iconLink = `<svg viewBox="0 0 24 24"><path d="M3.9 12c0-1.71 1.39-3.1 3.1-3.1h4V7H7c-2.76 0-5 2.24-5 5s2.24 5 5 5h4v-1.9H7c-1.71 0-3.1-1.39-3.1-3.1zM8 13h8v-2H8v2zm9-6h-4v1.9h4c1.71 0 3.1 1.39 3.1 3.1s-1.39 3.1-3.1 3.1h-4V17h4c2.76 0 5-2.24 5-5s-2.24-5-5-5z"/></svg>`;
-    const iconDelete = `<svg viewBox="0 0 24 24"><path d="M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z"/></svg>`;
+  function mobileQuota(total, quota, quotaPct) {
+    return u().el("div", { class: "m-quota-bar" }, [
+      progressBar(quotaPct),
+      u().el("div", { class: "m-quota-text" }, `${u().formatBytes(total)} / ${u().formatBytes(quota)}`)
+    ]);
+  }
 
-    let actionsHTML = `<button class="m-action-btn" data-action="edit" data-id="${esc(user.id)}">${iconEdit} 编辑</button>`;
+  function mobileActions(user, caps) {
+    const items = [actionButton("edit", user.id, "编辑", "m-action-btn", "edit", "编辑")];
     if (caps.disable_user || caps.enable_user) {
-      const icon = user.enabled ? iconDisable : iconEnable;
-      const label = user.enabled ? "禁用" : "启用";
-      actionsHTML += `<button class="m-action-btn" data-action="toggle" data-id="${esc(user.id)}">${icon} ${label}</button>`;
+      items.push(actionButton("toggle", user.id, user.enabled ? "禁用" : "启用", "m-action-btn", user.enabled ? "disable" : "enable", user.enabled ? "禁用" : "启用"));
     }
     if (caps.subscription) {
-      actionsHTML += `<button class="m-action-btn" data-action="sub" data-id="${esc(user.id)}">${iconLink} 订阅</button>`;
+      items.push(actionButton("sub", user.id, "订阅", "m-action-btn", "link", "订阅"));
     }
     if (caps.remove_user) {
-      actionsHTML += `<button class="m-action-btn danger" data-action="delete" data-id="${esc(user.id)}">${iconDelete} 删除</button>`;
+      items.push(actionButton("delete", user.id, "删除", "m-action-btn danger", "delete", "删除"));
     }
+    return items;
+  }
 
-    const chevronSVG = `<svg class="m-user-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"/></svg>`;
-
-    return `<div class="m-user-card${expanded ? ' expanded' : ''}" data-uid="${esc(user.id)}">
-      <div class="m-user-head">
-        <div class="m-user-avatar">${esc(initial)}</div>
-        <div class="m-user-info">
-          <div class="m-user-name">${esc(user.name || user.id)} ${statusBadge}</div>
-          <div class="m-user-uuid">${esc(uuidDisplay)}</div>
-        </div>
-        ${chevronSVG}
-      </div>
-      <div class="m-user-body">
-        <div class="m-user-stats">${statsHTML}</div>
-        ${quotaHTML}
-        <div class="m-user-actions">${actionsHTML}</div>
-      </div>
-    </div>`;
+  function chevronIcon() {
+    const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    svg.setAttribute("class", "m-user-chevron");
+    svg.setAttribute("viewBox", "0 0 24 24");
+    svg.setAttribute("fill", "none");
+    svg.setAttribute("stroke", "currentColor");
+    svg.setAttribute("stroke-width", "2");
+    svg.setAttribute("aria-hidden", "true");
+    const polyline = document.createElementNS("http://www.w3.org/2000/svg", "polyline");
+    polyline.setAttribute("points", "6 9 12 15 18 9");
+    svg.appendChild(polyline);
+    return svg;
   }
 
   async function onAction(event) {
+    event.stopPropagation();
     const id = event.currentTarget.dataset.id;
     const action = event.currentTarget.dataset.action;
     const user = users.find(item => item.id === id);
@@ -270,7 +316,14 @@
       return;
     }
     if (action === "delete") {
-      if (!confirm(`确定删除用户 ${user.name || user.id} 吗？`)) return;
+      const confirmed = await openConfirm({
+        title: "删除用户",
+        message: `此操作会删除用户 ${user.name || user.id}，请输入用户 ID 确认。`,
+        confirmText: user.id,
+        submitLabel: "删除",
+        danger: true
+      });
+      if (!confirmed) return;
       try {
         await window.api.deleteUser(id);
         u().toast("用户已删除", "success");
@@ -310,76 +363,177 @@
     });
   }
 
+  function formNode({ fields, caps }) {
+    return u().el("div", { class: "form-grid" }, [
+      formSection("基础信息", [
+        u().el("label", { class: "field full" }, [
+          u().el("span", {}, "用户 ID"),
+          u().el("input", { id: "field-id", placeholder: "留空则自动生成 UUID 或随机 ID" })
+        ]),
+        u().el("label", { class: "field" }, [
+          u().el("span", {}, "名称"),
+          u().el("input", { id: "field-name", required: true })
+        ])
+      ]),
+      formSection("连接凭据", [
+        u().el("div", { class: "form-section-note" }, "按所选协议显示对应字段。"),
+        fields.length ? fields.map(fieldNode) : u().el("div", { class: "hint" }, "当前适配器不需要额外凭据。")
+      ]),
+      formSection("配额与限速", [
+        quotaNodes(),
+        limitNodes(caps),
+        expireField("留空表示永不过期。")
+      ])
+    ]);
+  }
+
+  function editNode(user, caps) {
+    return u().el("div", { class: "form-grid" }, [
+      formSection("基础信息", [
+        u().el("label", { class: "field full" }, [
+          u().el("span", {}, "名称"),
+          u().el("input", { id: "field-name", value: user.name || "" })
+        ])
+      ]),
+      formSection("配额与限速", [
+        quotaNodes(user.quota),
+        limitNodes(caps, user),
+        expireField("清空表示永不过期。", user.expire_at ? String(user.expire_at).slice(0, 10) : "")
+      ])
+    ]);
+  }
+
+  function formSection(title, children) {
+    return u().el("div", { class: "form-section full" }, [
+      u().el("div", { class: "form-section-title" }, title),
+      children
+    ]);
+  }
+
+  function fieldNode(field) {
+    const attrs = {
+      class: "field credential-field",
+      id: `field-container-${field.key}`
+    };
+    if (field.depends_on_key) {
+      attrs["data-depends-key"] = field.depends_on_key;
+      attrs["data-depends-val"] = field.depends_on_val;
+    }
+
+    if (field.type === "select") {
+      return u().el("label", attrs, [
+        u().el("span", {}, field.label),
+        u().el("select", { id: `cred-${field.key}`, required: Boolean(field.required) },
+          (field.options || []).map(opt => u().el("option", {
+            value: opt,
+            selected: opt === field.default
+          }, opt || "(无)"))
+        )
+      ]);
+    }
+
+    const inputChildren = [
+      u().el("input", {
+        id: `cred-${field.key}`,
+        value: field.default || "",
+        required: Boolean(field.required)
+      })
+    ];
+    if (field.auto_generate) {
+      inputChildren.push(u().el("button", {
+        class: "btn ghost",
+        type: "button",
+        data: { generate: field.key }
+      }, "生成"));
+    }
+
+    return u().el("label", attrs, [
+      u().el("span", {}, field.label),
+      u().el("div", { class: "input-with-action" }, inputChildren)
+    ]);
+  }
+
+  function quotaNodes(quota = 0) {
+    return [
+      u().el("label", { class: "field" }, [
+        u().el("span", {}, "流量配额"),
+        u().el("input", {
+          id: "field-quota",
+          type: "number",
+          min: "0",
+          step: "any",
+          value: quota ? quota / 1073741824 : "",
+          placeholder: "0 = 无限制"
+        })
+      ]),
+      u().el("label", { class: "field" }, [
+        u().el("span", {}, "配额单位"),
+        u().el("select", { id: "field-quota_unit" }, [
+          u().el("option", { value: "gb" }, "GB"),
+          u().el("option", { value: "tb" }, "TB")
+        ])
+      ])
+    ];
+  }
+
+  function limitNodes(caps, user = {}) {
+    const hint = caps.speed_limit ? "底层适配器提供原生限速。" : "适配器暂无原生限速；由系统监控在软件层面执行限速。";
+    return [
+      u().el("label", { class: "field" }, [
+        u().el("span", {}, "上传限速"),
+        u().el("input", {
+          id: "field-limit_up",
+          type: "number",
+          min: "0",
+          step: "any",
+          value: user.speed_limit_up ? user.speed_limit_up / 1048576 : "",
+          placeholder: "0 = 无限制"
+        })
+      ]),
+      u().el("label", { class: "field" }, [
+        u().el("span", {}, "下载限速"),
+        u().el("input", {
+          id: "field-limit_down",
+          type: "number",
+          min: "0",
+          step: "any",
+          value: user.speed_limit_down ? user.speed_limit_down / 1048576 : "",
+          placeholder: "0 = 无限制"
+        })
+      ]),
+      u().el("label", { class: "field" }, [
+        u().el("span", {}, "上传限速单位"),
+        speedUnitSelect("field-limit_unit_up"),
+        u().el("span", { class: "hint" }, hint)
+      ]),
+      u().el("label", { class: "field" }, [
+        u().el("span", {}, "下载限速单位"),
+        speedUnitSelect("field-limit_unit_down")
+      ])
+    ];
+  }
+
+  function speedUnitSelect(id) {
+    return u().el("select", { id }, [
+      u().el("option", { value: "mbs" }, "MB/s"),
+      u().el("option", { value: "kbs" }, "KB/s")
+    ]);
+  }
+
+  function expireField(hint, value = "") {
+    return u().el("label", { class: "field" }, [
+      u().el("span", {}, "过期时间"),
+      u().el("input", { id: "field-expire", type: "date", value }),
+      u().el("span", { class: "hint" }, hint)
+    ]);
+  }
+
   function formHTML({ fields, caps }) {
-    return `<div class="form-grid">
-      <div class="form-section full">
-        <div class="form-section-title">基础信息</div>
-        <label class="field full"><span>用户 ID</span><input id="field-id" placeholder="留空则自动生成 UUID 或随机 ID"></label>
-        <label class="field"><span>名称</span><input id="field-name" required></label>
-      </div>
-      <div class="form-section full">
-        <div class="form-section-title">连接凭据</div>
-        <div class="form-section-note">按所选协议显示对应字段。</div>
-        ${fields.map(fieldHTML).join("") || `<div class="hint">当前适配器不需要额外凭据。</div>`}
-      </div>
-      <div class="form-section full">
-        <div class="form-section-title">配额与限速</div>
-        ${quotaHTML()}
-        ${limitHTML(caps)}
-        <label class="field"><span>过期时间</span><input id="field-expire" type="date"><span class="hint">留空表示永不过期。</span></label>
-      </div>
-    </div>`;
+    return formNode({ fields, caps });
   }
 
   function editHTML(user, caps) {
-    return `<div class="form-grid">
-      <div class="form-section full">
-        <div class="form-section-title">基础信息</div>
-        <label class="field full"><span>名称</span><input id="field-name" value="${u().escapeHtml(user.name || "")}"></label>
-      </div>
-      <div class="form-section full">
-        <div class="form-section-title">配额与限速</div>
-        ${quotaHTML(user.quota)}
-        ${limitHTML(caps, user)}
-        <label class="field"><span>过期时间</span><input id="field-expire" type="date" value="${user.expire_at ? String(user.expire_at).slice(0, 10) : ""}"><span class="hint">清空表示永不过期。</span></label>
-      </div>
-    </div>`;
-  }
-
-  function fieldHTML(field) {
-    const required = field.required ? " required" : "";
-    const value = field.default || "";
-    const depAttrs = field.depends_on_key 
-      ? ` data-depends-key="${u().escapeHtml(field.depends_on_key)}" data-depends-val="${u().escapeHtml(field.depends_on_val)}"` 
-      : "";
-    if (field.type === "select") {
-      return `<label class="field credential-field" id="field-container-${u().escapeHtml(field.key)}"${depAttrs}>
-        <span>${u().escapeHtml(field.label)}</span>
-        <select id="cred-${u().escapeHtml(field.key)}"${required}>
-          ${(field.options || []).map(opt => `<option value="${u().escapeHtml(opt)}"${opt === field.default ? ' selected' : ''}>${u().escapeHtml(opt || "(无)")}</option>`).join("")}
-        </select>
-      </label>`;
-    }
-    return `<label class="field credential-field" id="field-container-${u().escapeHtml(field.key)}"${depAttrs}>
-      <span>${u().escapeHtml(field.label)}</span>
-      <div class="input-with-action">
-        <input id="cred-${u().escapeHtml(field.key)}" value="${u().escapeHtml(value)}"${required}>
-        ${field.auto_generate ? `<button class="btn ghost" type="button" data-generate="${u().escapeHtml(field.key)}">生成</button>` : ""}
-      </div>
-    </label>`;
-  }
-
-  function quotaHTML(quota = 0) {
-    return `<label class="field"><span>流量配额</span><input id="field-quota" type="number" min="0" step="any" value="${quota ? quota / 1073741824 : ""}" placeholder="0 = 无限制"></label>
-      <label class="field"><span>配额单位</span><select id="field-quota_unit"><option value="gb">GB</option><option value="tb">TB</option></select></label>`;
-  }
-
-  function limitHTML(caps, user = {}) {
-    const hint = caps.speed_limit ? "底层适配器提供原生限速。" : "适配器暂无原生限速；由系统监控在软件层面执行限速。";
-    return `<label class="field"><span>上传限速</span><input id="field-limit_up" type="number" min="0" step="any" value="${user.speed_limit_up ? user.speed_limit_up / 1048576 : ""}" placeholder="0 = 无限制"></label>
-      <label class="field"><span>下载限速</span><input id="field-limit_down" type="number" min="0" step="any" value="${user.speed_limit_down ? user.speed_limit_down / 1048576 : ""}" placeholder="0 = 无限制"></label>
-      <label class="field"><span>上传限速单位</span><select id="field-limit_unit_up"><option value="mbs">MB/s</option><option value="kbs">KB/s</option></select><span class="hint">${hint}</span></label>
-      <label class="field"><span>下载限速单位</span><select id="field-limit_unit_down"><option value="mbs">MB/s</option><option value="kbs">KB/s</option></select></label>`;
+    return editNode(user, caps);
   }
 
   function collectForm(fields, caps) {
@@ -387,7 +541,7 @@
     fields.forEach(field => {
       const container = document.getElementById(`field-container-${field.key}`);
       if (container && container.classList.contains("hidden")) {
-        return; // 隐藏字段跳过收集和校验
+        return;
       }
       const raw = document.getElementById(`cred-${field.key}`)?.value?.trim() || "";
       if (field.required && !raw) throw new Error(`${field.label} 为必填项`);
@@ -406,45 +560,118 @@
 
   function openModal(title, body, onSubmit) {
     const root = document.getElementById("modal-root");
-    root.innerHTML = `<div class="modal" role="dialog" aria-modal="true" aria-labelledby="modal-title">
-      <div class="modal-header"><h3 id="modal-title">${u().escapeHtml(title)}</h3><button class="btn ghost icon" data-close aria-label="关闭">×</button></div>
-      <div class="modal-body">${body}</div>
-      <div class="modal-footer"><button class="btn ghost" data-close>取消</button><button class="btn primary" data-submit>保存</button></div>
-    </div>`;
+    if (!root) return;
+    u().clear(root);
+    const bodyNode = u().el("div", { class: "modal-body" });
+    u().append(bodyNode, body);
+    const modal = u().el("div", { class: "modal", role: "dialog", "aria-modal": "true", "aria-labelledby": "modal-title" }, [
+      u().el("div", { class: "modal-header" }, [
+        u().el("h3", { id: "modal-title" }, title),
+        u().el("button", { class: "btn ghost icon", type: "button", "aria-label": "关闭", onclick: hideModal }, "×")
+      ]),
+      bodyNode,
+      u().el("div", { class: "modal-footer" }, [
+        u().el("button", { class: "btn ghost", type: "button", onclick: hideModal }, "取消"),
+        u().el("button", { class: "btn primary", type: "button", onclick: submit }, "保存")
+      ])
+    ]);
+    root.appendChild(modal);
     root.classList.remove("hidden");
     document.body.classList.add("modal-open");
-    root.querySelectorAll("[data-close]").forEach(btn => btn.addEventListener("click", closeModal));
-    root.addEventListener("click", event => {
-      if (event.target === root) closeModal();
-    }, { once: true });
-    root.querySelector("[data-submit]").addEventListener("click", async () => {
+    root.onclick = onBackdropClick;
+
+    async function submit() {
       try {
         await onSubmit();
-        closeModal();
+        hideModal();
       } catch (err) {
         u().toast(err.message, "error");
       }
+    }
+  }
+
+  function openConfirm({ title, message, confirmText, submitLabel = "确认", danger = false }) {
+    const root = document.getElementById("modal-root");
+    if (!root) return Promise.resolve(false);
+    return new Promise(resolve => {
+      u().clear(root);
+      const input = confirmText ? u().el("input", { type: "text", autocomplete: "off" }) : null;
+      const submit = u().el("button", {
+        class: danger ? "btn danger" : "btn primary",
+        type: "button",
+        disabled: Boolean(confirmText)
+      }, submitLabel);
+
+      if (input) {
+        input.addEventListener("input", () => {
+          submit.disabled = input.value !== confirmText;
+        });
+      }
+
+      const finish = result => {
+        hideModal();
+        resolve(result);
+      };
+      submit.addEventListener("click", () => finish(true));
+
+      const bodyChildren = [
+        u().el("p", { class: "hint" }, message)
+      ];
+      if (input) {
+        bodyChildren.push(u().el("label", { class: "field full" }, [
+          u().el("span", {}, `输入 ${confirmText} 确认`),
+          input
+        ]));
+      }
+
+      const modal = u().el("div", { class: "modal", role: "dialog", "aria-modal": "true", "aria-labelledby": "modal-title" }, [
+        u().el("div", { class: "modal-header" }, [
+          u().el("h3", { id: "modal-title" }, title),
+          u().el("button", { class: "btn ghost icon", type: "button", "aria-label": "关闭", onclick: () => finish(false) }, "×")
+        ]),
+        u().el("div", { class: "modal-body" }, bodyChildren),
+        u().el("div", { class: "modal-footer" }, [
+          u().el("button", { class: "btn ghost", type: "button", onclick: () => finish(false) }, "取消"),
+          submit
+        ])
+      ]);
+
+      root.appendChild(modal);
+      root.classList.remove("hidden");
+      document.body.classList.add("modal-open");
+      root.onclick = event => {
+        if (event.target === root) finish(false);
+      };
+      input?.focus();
     });
   }
 
-  function closeModal() {
-    document.getElementById("modal-root").classList.add("hidden");
+  function onBackdropClick(event) {
+    if (event.target === event.currentTarget) hideModal();
+  }
+
+  function hideModal() {
+    const root = document.getElementById("modal-root");
+    if (!root) return;
+    root.classList.add("hidden");
     document.body.classList.remove("modal-open");
+    root.onclick = null;
+    u().clear(root);
   }
 
   function wireAutoGenerate(fields) {
     fields.forEach(field => {
       if (!field.auto_generate) return;
-      document.querySelector(`[data-generate="${field.key}"]`)?.addEventListener("click", () => {
+      const button = Array.from(document.querySelectorAll("[data-generate]")).find(el => el.dataset.generate === field.key);
+      button?.addEventListener("click", () => {
         document.getElementById(`cred-${field.key}`).value = u().generateUUID();
       });
     });
   }
 
   function wireDependencies(fields) {
-    // 收集所有作为依赖源的字段 Key (例如 "protocol")
     const depSources = new Set(fields.filter(f => f.depends_on_key).map(f => f.depends_on_key));
-    
+
     const updateVisibility = () => {
       fields.forEach(field => {
         if (!field.depends_on_key) return;
@@ -463,7 +690,6 @@
             if (field.required) input.setAttribute("required", "");
           } else {
             input.removeAttribute("required");
-            // 当隐藏时重置其值，避免残留垃圾数据
             if (input.tagName === "SELECT") {
               input.selectedIndex = 0;
             } else {
@@ -474,13 +700,11 @@
       });
     };
 
-    // 绑定 change 事件到各个依赖源
     depSources.forEach(key => {
       const el = document.getElementById(`cred-${key}`);
       el?.addEventListener("change", updateVisibility);
     });
 
-    // 首次载入初始化一次显隐状态
     updateVisibility();
   }
 
@@ -501,10 +725,6 @@
     if (!n || n < 0) return 0;
     return Math.round(n * (unit === "kbs" ? 1024 : 1048576));
   }
-  function shortID(id) {
-    if (!id) return "-";
-    return id.length > 18 ? `${id.slice(0, 10)}...${id.slice(-4)}` : id;
-  }
 
   function start() {
     stop();
@@ -515,7 +735,6 @@
         search = event.target.value;
         render();
       }, 150));
-      // Re-render on viewport resize to switch between mobile cards and desktop table
       window.addEventListener("resize", onResize);
       bound = true;
     }
@@ -527,7 +746,6 @@
   function onResize() {
     const mobile = isMobile();
     if (lastMobile !== null && mobile !== lastMobile) {
-      // Viewport crossed breakpoint — force full re-render
       const mobileList = document.querySelector(".mobile-user-list");
       if (mobileList) mobileList.remove();
       render();

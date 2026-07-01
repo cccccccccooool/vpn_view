@@ -29,6 +29,81 @@
     }[ch]));
   }
 
+  function text(value) {
+    return document.createTextNode(String(value ?? ""));
+  }
+
+  function clear(node) {
+    if (!node) return;
+    while (node.firstChild) node.removeChild(node.firstChild);
+  }
+
+  function append(parent, children) {
+    const items = Array.isArray(children) ? children : [children];
+    items.forEach(child => {
+      if (child === null || child === undefined || child === false) return;
+      if (Array.isArray(child)) append(parent, child);
+      else if (child instanceof Node) parent.appendChild(child);
+      else parent.appendChild(text(child));
+    });
+  }
+
+  function setAttrs(node, attrs = {}) {
+    Object.entries(attrs || {}).forEach(([key, value]) => {
+      if (value === null || value === undefined || value === false) return;
+      if (key === "class" || key === "className") {
+        const classValue = Array.isArray(value) ? value.filter(Boolean).join(" ") : String(value);
+        if (node.namespaceURI === "http://www.w3.org/2000/svg") node.setAttribute("class", classValue);
+        else node.className = classValue;
+        return;
+      }
+      if (key === "dataset" || key === "data") {
+        Object.entries(value || {}).forEach(([dataKey, dataValue]) => {
+          if (dataValue !== null && dataValue !== undefined) node.dataset[dataKey] = String(dataValue);
+        });
+        return;
+      }
+      if (key === "style") {
+        Object.entries(value || {}).forEach(([styleKey, styleValue]) => {
+          if (styleValue !== null && styleValue !== undefined) node.style[styleKey] = String(styleValue);
+        });
+        return;
+      }
+      if (key.startsWith("on") && typeof value === "function") {
+        node.addEventListener(key.slice(2).toLowerCase(), value);
+        return;
+      }
+      if (value === true) {
+        node.setAttribute(key, "");
+        return;
+      }
+      node.setAttribute(key, String(value));
+    });
+  }
+
+  function el(tag, attrs = {}, children = []) {
+    const node = document.createElement(tag);
+    setAttrs(node, attrs);
+    append(node, children);
+    return node;
+  }
+
+  function svgIcon(pathD, attrs = {}) {
+    const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    setAttrs(svg, { viewBox: "0 0 24 24", "aria-hidden": "true", focusable: "false", ...attrs });
+    const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+    path.setAttribute("d", pathD);
+    path.setAttribute("fill", "currentColor");
+    svg.appendChild(path);
+    return svg;
+  }
+
+  function setProgressWidth(node, percent) {
+    const value = Number(percent);
+    const clamped = Number.isFinite(value) ? Math.max(0, Math.min(100, value)) : 0;
+    node.style.width = `${clamped}%`;
+  }
+
   function generateUUID() {
     if (crypto.randomUUID) return crypto.randomUUID();
     return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, c => {
@@ -49,45 +124,41 @@
   function toast(message, type = "info") {
     const root = document.getElementById("toast-root");
     if (!root) return;
-    const el = document.createElement("div");
-    el.className = `toast ${type}`;
-    el.textContent = message;
-    root.appendChild(el);
-    setTimeout(() => el.remove(), 3500);
+    const item = document.createElement("div");
+    item.className = `toast ${type}`;
+    item.textContent = message;
+    root.appendChild(item);
+    setTimeout(() => item.remove(), 3500);
   }
 
-  async function copy(text, label = "Text") {
+  async function copy(value, label = "Text") {
     if (navigator.clipboard && window.isSecureContext) {
       try {
-        await navigator.clipboard.writeText(text);
-        toast(`${label} 已复制`, "success");
+        await navigator.clipboard.writeText(value);
+        toast(`${label} copied`, "success");
         return;
       } catch (err) {
         console.warn("Clipboard API failed", err);
       }
     }
-    
-    // Fallback for HTTP (non-secure context)
+
     try {
       const textArea = document.createElement("textarea");
-      textArea.value = text;
+      textArea.value = value;
       textArea.style.position = "absolute";
       textArea.style.left = "-99999px";
-      textArea.style.top = (window.pageYOffset || document.documentElement.scrollTop) + "px";
+      textArea.style.top = `${window.pageYOffset || document.documentElement.scrollTop}px`;
       document.body.appendChild(textArea);
       textArea.focus();
       textArea.select();
-      textArea.setSelectionRange(0, 99999); // For iOS devices
-      const successful = document.execCommand('copy');
+      textArea.setSelectionRange(0, 99999);
+      const successful = document.execCommand("copy");
       document.body.removeChild(textArea);
-      if (successful) {
-        toast(`${label} 已复制`, "success");
-      } else {
-        throw new Error('execCommand failed');
-      }
+      if (!successful) throw new Error("execCommand failed");
+      toast(`${label} copied`, "success");
     } catch (err) {
-      toast(`复制失败: 请手动复制`, "error");
-      prompt("您的浏览器不支持自动复制，请手动复制以下内容：", text);
+      console.warn("Clipboard fallback failed", err);
+      toast("Copy failed in this browser context", "error");
     }
   }
 
@@ -96,6 +167,12 @@
     formatSpeed,
     formatDate,
     escapeHtml,
+    text,
+    clear,
+    append,
+    el,
+    svgIcon,
+    setProgressWidth,
     generateUUID,
     debounce,
     toast,

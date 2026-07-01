@@ -22,6 +22,38 @@ adapter:
   # subscription_type: "tcp"
   # subscription_tls: true
 
+cores:
+  default: "legacy"
+  enabled: ["legacy"]
+  items:
+    legacy:
+      type: "stub"
+      enabled: true
+      role: "primary"
+      config:
+        mock_users: 0
+
+  # Example sing-box core:
+  # default: "singbox-main"
+  # enabled: ["singbox-main"]
+  # items:
+  #   singbox-main:
+  #     type: "singbox"
+  #     enabled: true
+  #     role: "primary"
+  #     config:
+  #       singbox_config_path: "/etc/sing-box/config.json"
+  #       config_template_path: "/etc/sing-box/config.template.json"
+  #       inbound_tag: "vless-in"
+  #       reload_command: "systemctl reload sing-box"
+  #       clash_api: "http://127.0.0.1:9090"
+  #       clash_secret: ""
+  #       v2ray_api: "127.0.0.1:10085"
+  #       subscription_domain: "vpn.example.com"
+  #       subscription_port: 443
+  #       subscription_type: "tcp"
+  #       subscription_tls: true
+
 store:
   sqlite:
     path: "./data/vpnview.db"

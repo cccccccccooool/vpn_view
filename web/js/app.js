@@ -10,12 +10,12 @@
       document.getElementById("btn-logout-mobile")?.addEventListener("click", () => this.logout());
       window.addEventListener("hashchange", () => this.navigate(location.hash));
 
-      if (window.api.token) {
+      if (window.api.hasSession()) {
         try {
           await this.bootstrap();
           this.navigate(location.hash || "#/dashboard");
         } catch {
-          this.logout();
+          await this.logout();
         }
       } else {
         this.showLogin();
@@ -31,13 +31,14 @@
 
     applyCapabilities() {
       const supported = Object.entries(this.capabilities).filter(([, ok]) => ok).length;
+      const coreLabel = this.capsPayload?.default_core ? `${this.capsPayload.default_core} · ${supported} capabilities` : `${supported} capabilities`;
       document.querySelectorAll(".adapter-label-text").forEach(el => {
-        el.textContent = `${supported} capabilities`;
+        el.textContent = coreLabel;
       });
     },
 
     navigate(hash) {
-      if (!window.api.token) {
+      if (!window.api.hasSession()) {
         this.showLogin();
         return;
       }
@@ -69,8 +70,8 @@
       if (location.hash !== "#/login") location.hash = "#/login";
     },
 
-    logout() {
-      window.api.token = null;
+    async logout() {
+      await window.api.logout();
       this.showLogin();
     }
   };

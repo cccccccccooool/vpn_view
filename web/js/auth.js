@@ -10,19 +10,18 @@
       event.preventDefault();
       error.classList.add("hidden");
       submit.disabled = true;
-      submit.textContent = "正在登录...";
+      submit.textContent = "Signing in...";
       try {
-        const result = await window.api.login(input.value);
-        window.api.token = result.token;
+        await window.api.login(input.value);
         input.value = "";
         await window.app.bootstrap();
         window.app.navigate("#/dashboard");
       } catch (err) {
-        error.textContent = err.message || "登录失败";
+        error.textContent = err.message || "Login failed";
         error.classList.remove("hidden");
       } finally {
         submit.disabled = false;
-        submit.textContent = "登录";
+        submit.textContent = "Sign in";
       }
     });
   }

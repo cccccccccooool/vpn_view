@@ -61,6 +61,7 @@ func (h *UserHandler) CreateUser(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		ID             string            `json:"id"`
 		Name           string            `json:"name"`
+		CoreID         string            `json:"core_id"`
 		Credentials    map[string]string `json:"credentials"`
 		Quota          int64             `json:"quota"`
 		SpeedLimitUp   int64             `json:"speed_limit_up"`
@@ -85,7 +86,7 @@ func (h *UserHandler) CreateUser(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 委托服务层创建并同步底层 VPN 内核
-	if err := h.userSvc.CreateUser(r.Context(), req.ID, req.Name, req.Credentials, req.Quota, req.SpeedLimitUp, req.SpeedLimitDown, req.ExpireAt); err != nil {
+	if err := h.userSvc.CreateUser(r.Context(), req.ID, req.Name, req.CoreID, req.Credentials, req.Quota, req.SpeedLimitUp, req.SpeedLimitDown, req.ExpireAt); err != nil {
 		writeDomainError(w, err)
 		return
 	}
