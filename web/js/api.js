@@ -5,19 +5,27 @@
   class API {
     constructor() {
       this.base = window.location.origin;
+      this.clearLegacyToken();
+    }
+
+    clearLegacyToken() {
+      try {
+        localStorage.removeItem(LEGACY_TOKEN);
+      } catch (_) {
+        // Ignore storage access errors in hardened browser contexts.
+      }
     }
 
     get token() {
-      return localStorage.getItem(LEGACY_TOKEN);
+      return "";
     }
 
-    set token(value) {
-      if (value) localStorage.setItem(LEGACY_TOKEN, value);
-      else localStorage.removeItem(LEGACY_TOKEN);
+    set token(_value) {
+      this.clearLegacyToken();
     }
 
     hasSession() {
-      return Boolean(this.token || sessionStorage.getItem(AUTH_MARKER) || this.csrfToken());
+      return Boolean(sessionStorage.getItem(AUTH_MARKER) || this.csrfToken());
     }
 
     markAuthenticated() {
@@ -26,7 +34,7 @@
 
     clearSession() {
       sessionStorage.removeItem(AUTH_MARKER);
-      this.token = null;
+      this.clearLegacyToken();
     }
 
     csrfToken() {
@@ -37,7 +45,6 @@
     async request(method, path, body, options = {}) {
       const headers = {};
       if (body !== undefined) headers["Content-Type"] = "application/json";
-      if (this.token && !options.noAuth) headers.Authorization = `Bearer ${this.token}`;
       if (!options.noAuth && !["GET", "HEAD", "OPTIONS"].includes(method)) {
         const csrf = this.csrfToken();
         if (csrf) headers["X-CSRF-Token"] = csrf;

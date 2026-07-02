@@ -13,6 +13,7 @@ adapter:
   type: "stub"
   mock_users: 0
 
+  # Legacy single-adapter sing-box example. New deployments should prefer cores.
   # type: "singbox"
   # singbox_config_path: "/etc/sing-box/config.json"
   # config_template_path: "/etc/sing-box/config.template.json"
@@ -58,21 +59,21 @@ cores:
   #       subscription_type: "tcp"
   #       subscription_tls: true
 
-  # Example Xray-core / V2Ray-core core (config_patch mode; aliases: xray-core / v2ray / v2ray-core / v2fly):
+  # Example Xray-core / V2Ray-core core:
   # default: "xray-main"
   # enabled: ["xray-main"]
   # items:
   #   xray-main:
-  #     type: "xray"                # 或 "v2ray"，仅影响 gRPC 统计服务包路径与展示名
+  #     type: "xray"                # or "v2ray"; affects stats gRPC path and display name.
   #     enabled: true
   #     role: "primary"
   #     config:
-  #       xray_config_path: "/etc/xray/config.json"
+  #       xray_config_path: "/etc/xray/config.json"   # v2ray_config_path is also accepted for type: "v2ray".
   #       config_template_path: "/etc/xray/config.template.json"
-  #       inbound_tag: "vless-in"          # 可选：只管理该 tag 的 inbound，留空则管理全部受支持协议
+  #       inbound_tag: "vless-in"   # Optional. Empty means all supported protocol inbounds.
   #       reload_command: "systemctl reload xray"
-  #       api_address: "127.0.0.1:10085"   # Xray/V2Ray 内置 Stats gRPC API，留空则关闭流量统计能力
-  #       # stats_query_method: ""          # 可选：显式覆盖 QueryStats gRPC 全路径，默认按 type 自动推导
+  #       api_address: "127.0.0.1:10085"
+  #       # stats_query_method: ""  # Optional explicit QueryStats full method override.
   #       subscription_domain: "vpn.example.com"
   #       subscription_port: 443
   #       subscription_type: "tcp"

@@ -13,6 +13,7 @@ DEFAULT_REPO="sihasiha/vpn_view"
 INSTALL_ID="$(date +%Y%m%d%H%M%S%N)"
 MANIFEST_FILE="${ETC_DIR}/install-manifest-${INSTALL_ID}.json"
 ROLLBACK_ON_FAILURE=0
+CONFIG_CREATED=0
 
 VPNVIEW_REPO="${VPNVIEW_REPO:-$DEFAULT_REPO}"
 VPNVIEW_VERSION="${VPNVIEW_VERSION:-latest}"
@@ -22,6 +23,7 @@ VPNVIEW_CLIENT_CONFIG="${VPNVIEW_CLIENT_CONFIG:-}"
 VPNVIEW_CLIENT_SERVICE="${VPNVIEW_CLIENT_SERVICE:-}"
 VPNVIEW_PROTOCOL="${VPNVIEW_PROTOCOL:-}"
 VPNVIEW_MODE="${VPNVIEW_MODE:-takeover}"
+VPNVIEW_EXPERIMENTAL_TAKEOVER="${VPNVIEW_EXPERIMENTAL_TAKEOVER:-0}"
 SINGBOX_BIN="${SINGBOX_BIN:-}"
 SKIP_DOWNLOAD="${SKIP_DOWNLOAD:-0}"
 
@@ -58,7 +60,7 @@ usage() {
     "  --local PATH       Install from a local VPNView binary." \
     "  --repo OWNER/REPO  GitHub repository used for online release download." \
     "  --version TAG      Release tag. Defaults to latest." \
-    "  --protocol NAME    VPN core/protocol to manage: singbox, xray, mihomo, hysteria2, tuic, stub." \
+    "  --protocol NAME    VPN core/protocol to manage: singbox, xray, v2ray, mihomo, hysteria2, tuic, stub." \
     "  --mode MODE        takeover, panel-only, or dry-run. Defaults to takeover." \
     "  --skip-download    Do not download a binary; require an existing local binary." \
     "  -h, --help         Show this help." \
@@ -72,6 +74,7 @@ usage() {
     "  VPNVIEW_CLIENT_SERVICE Override the managed VPN client systemd service name." \
     "  VPNVIEW_PROTOCOL   Non-interactive protocol selection." \
     "  VPNVIEW_MODE       takeover, panel-only, or dry-run." \
+    "  VPNVIEW_EXPERIMENTAL_TAKEOVER=1 allows xray/v2ray takeover while converters are still being hardened." \
     "  SINGBOX_BIN        sing-box binary path if it is not in PATH."
 }
 
@@ -550,11 +553,12 @@ patch_config() {
   local template_path="$2"
   local client_config_key="$3"
   local client_config_path="$4"
-  python3 - "$CONFIG_FILE" "$adapter_type" "$template_path" "$client_config_key" "$client_config_path" "$DATA_DIR/vpnview.db" <<'PY'
+  local migrate_default_core="${5:-0}"
+  python3 - "$CONFIG_FILE" "$adapter_type" "$template_path" "$client_config_key" "$client_config_path" "$DATA_DIR/vpnview.db" "$migrate_default_core" <<'PY'
 import re
 import sys
 
-path, adapter_type, template_path, client_config_key, client_config_path, db_path = sys.argv[1:]
+path, adapter_type, template_path, client_config_key, client_config_path, db_path, migrate_default_core = sys.argv[1:]
 
 try:
     lines = open(path, "r", encoding="utf-8").read().splitlines()
@@ -635,6 +639,25 @@ def replace_existing_key_anywhere(lines, key, value):
             out.append(line)
     return out
 
+def migrate_default_installer_core(lines, adapter_type, template_path, client_config_key, client_config_path):
+    core_id = f"{adapter_type.lower()}-main"
+    out = []
+    for line in lines:
+        updated = line.replace("default: \"singbox-main\"", f"default: \"{core_id}\"")
+        updated = updated.replace("enabled: [\"singbox-main\"]", f"enabled: [\"{core_id}\"]")
+        updated = updated.replace("  singbox-main:", f"  {core_id}:")
+        stripped = updated.strip()
+        if stripped == 'type: "singbox"' or stripped == "type: 'singbox'":
+            updated = updated[:len(updated) - len(updated.lstrip())] + f'type: "{adapter_type}"'
+        if client_config_key and stripped.startswith("singbox_config_path:"):
+            indent = updated[:len(updated) - len(updated.lstrip())]
+            updated = f'{indent}{client_config_key}: "{client_config_path}"'
+        out.append(updated)
+    out = replace_existing_key_anywhere(out, "config_template_path", template_path)
+    if client_config_key:
+        out = replace_existing_key_anywhere(out, client_config_key, client_config_path)
+    return out
+
 lines = set_section_key(lines, "adapter", "type", adapter_type)
 if adapter_type.lower() not in {"stub", ""}:
     lines = set_section_key(lines, "adapter", "config_template_path", template_path)
@@ -642,9 +665,12 @@ if adapter_type.lower() not in {"stub", ""}:
         lines = set_section_key(lines, "adapter", client_config_key, client_config_path)
     if adapter_type.lower() in {"singbox", "sing-box"}:
         lines = set_section_key(lines, "adapter", "inbound_tag", "")
-    lines = replace_existing_key_anywhere(lines, "config_template_path", template_path)
-    if client_config_key:
-        lines = replace_existing_key_anywhere(lines, client_config_key, client_config_path)
+    if migrate_default_core == "1":
+        lines = replace_existing_key_anywhere(lines, "config_template_path", template_path)
+        if client_config_key:
+            lines = replace_existing_key_anywhere(lines, client_config_key, client_config_path)
+        if adapter_type.lower() != "singbox" and any("singbox-main" in line for line in lines):
+            lines = migrate_default_installer_core(lines, adapter_type, template_path, client_config_key, client_config_path)
 lines = ensure_store_sqlite_path(lines, db_path)
 
 with open(path, "w", encoding="utf-8", newline="\n") as f:
@@ -653,31 +679,41 @@ PY
 }
 
 ensure_directories() {
+  local created_etc=0
+  local created_data=0
+  local created_singbox=0
   if [ ! -d "$ETC_DIR" ]; then
     record_manifest_dir "$ETC_DIR"
+    created_etc=1
   fi
   mkdir -p "$ETC_DIR"
   if [ ! -d "$DATA_DIR" ]; then
     record_manifest_dir "$DATA_DIR"
+    created_data=1
   fi
   mkdir -p "$DATA_DIR"
   local singbox_dir
   singbox_dir="$(dirname "$DEFAULT_SINGBOX_CONFIG")"
   if [ ! -d "$singbox_dir" ]; then
     record_manifest_dir "$singbox_dir"
+    created_singbox=1
   fi
   mkdir -p "$singbox_dir"
-  chmod 0755 "$ETC_DIR" "$DATA_DIR"
+  [ "$created_etc" = "0" ] || chmod 0755 "$ETC_DIR"
+  [ "$created_data" = "0" ] || chmod 0755 "$DATA_DIR"
+  [ "$created_singbox" = "0" ] || chmod 0755 "$singbox_dir"
   ok "initialized ${ETC_DIR} and ${DATA_DIR}"
 }
 
 ensure_config() {
   if [ ! -f "$CONFIG_FILE" ]; then
+    CONFIG_CREATED=1
     log "creating default ${CONFIG_FILE}"
     backup_file "$CONFIG_FILE"
     create_default_config "$(random_secret)"
     ok "created ${CONFIG_FILE}; the login secret was generated automatically"
   else
+    CONFIG_CREATED=0
     backup_file "$CONFIG_FILE"
   fi
 }
@@ -714,6 +750,7 @@ normalize_protocol() {
   case "$protocol" in
     singbox|sing-box) printf 'singbox' ;;
     xray|xray-core) printf 'xray' ;;
+    v2ray|v2ray-core|v2fly) printf 'v2ray' ;;
     clash|clash-meta|mihomo) printf 'mihomo' ;;
     hysteria|hysteria2) printf 'hysteria2' ;;
     tuic) printf 'tuic' ;;
@@ -736,19 +773,21 @@ choose_protocol() {
     "Please select the VPN core/protocol to manage:" \
     "  1) singbox" \
     "  2) xray" \
-    "  3) mihomo" \
-    "  4) hysteria2" \
-    "  5) tuic" \
-    "  6) stub" >&2
+    "  3) v2ray" \
+    "  4) mihomo" \
+    "  5) hysteria2" \
+    "  6) tuic" \
+    "  7) stub" >&2
   printf 'Enter number or name: ' >&2
   read -r raw
   case "$raw" in
     1) raw="singbox" ;;
     2) raw="xray" ;;
-    3) raw="mihomo" ;;
-    4) raw="hysteria2" ;;
-    5) raw="tuic" ;;
-    6) raw="stub" ;;
+    3) raw="v2ray" ;;
+    4) raw="mihomo" ;;
+    5) raw="hysteria2" ;;
+    6) raw="tuic" ;;
+    7) raw="stub" ;;
   esac
   normalize_protocol "$raw" || die "unsupported protocol: ${raw}"
 }
@@ -773,16 +812,37 @@ print_install_plan() {
   local client_bin="${8:-}"
   python3 - "$mode" "$protocol" "$adapter_type" "$core_id" "$client_service" "$client_config" "$template_path" "$client_bin" <<'PY'
 import json
+import os
 import sys
 
 mode, protocol, adapter_type, core_id, client_service, client_config, template_path, client_bin = sys.argv[1:]
+converters = {
+    "singbox": "singbox-json",
+    "xray": "xray-json",
+    "v2ray": "xray-json",
+    "tuic": "tuic-json",
+    "mihomo": "",
+    "hysteria2": "",
+    "stub": "",
+}
+experimental_takeover = os.environ.get("VPNVIEW_EXPERIMENTAL_TAKEOVER") == "1"
+takeover_supported = protocol == "singbox" or (protocol in {"xray", "v2ray"} and experimental_takeover)
+if takeover_supported:
+    takeover_blocker = ""
+elif protocol in {"xray", "v2ray"}:
+    takeover_blocker = "requires VPNVIEW_EXPERIMENTAL_TAKEOVER=1 until Linux/systemd takeover is fully verified"
+else:
+    takeover_blocker = "runtime adapter is not production-ready for takeover"
 print(json.dumps({
     "mode": mode,
     "protocol": protocol,
     "adapter_type": adapter_type,
     "core_id": core_id,
-    "converter": "singbox-json" if protocol == "singbox" else "",
-    "config_format": "json" if protocol in {"singbox", "xray", "tuic"} else ("yaml" if protocol in {"mihomo", "hysteria2"} else "none"),
+    "converter": converters.get(protocol, ""),
+    "takeover_supported": takeover_supported,
+    "takeover_blocker": takeover_blocker,
+    "takeover_stage": "production" if protocol == "singbox" else ("experimental" if protocol in {"xray", "v2ray"} else "unsupported"),
+    "config_format": "json" if protocol in {"singbox", "xray", "v2ray", "tuic"} else ("yaml" if protocol in {"mihomo", "hysteria2"} else "none"),
     "client_service": client_service,
     "client_binary": client_bin,
     "runtime_config": client_config,
@@ -797,6 +857,8 @@ adapter_config_key() {
   local adapter_type="$1"
   case "$adapter_type" in
     singbox) printf 'singbox_config_path' ;;
+    xray) printf 'xray_config_path' ;;
+    v2ray) printf 'v2ray_config_path' ;;
     *) printf '%s_config_path' "$(printf '%s' "$adapter_type" | tr '-' '_')" ;;
   esac
 }
@@ -809,6 +871,8 @@ client_service_name() {
   fi
   case "$adapter_type" in
     singbox) printf 'sing-box' ;;
+    xray) printf 'xray' ;;
+    v2ray) printf 'v2ray' ;;
     *) printf '%s' "$adapter_type" ;;
   esac
 }
@@ -817,13 +881,18 @@ client_binary_name() {
   local adapter_type="$1"
   case "$adapter_type" in
     singbox) printf 'sing-box' ;;
+    v2ray) printf 'v2ray' ;;
     *) printf '%s' "$adapter_type" ;;
   esac
 }
 
 template_file_for_adapter() {
   local adapter_type="$1"
-  printf '%s/%s_template.json' "$ETC_DIR" "$(printf '%s' "$adapter_type" | tr '-' '_')"
+  local ext="json"
+  case "$adapter_type" in
+    mihomo|hysteria2) ext="yaml" ;;
+  esac
+  printf '%s/%s_template.%s' "$ETC_DIR" "$(printf '%s' "$adapter_type" | tr '-' '_')" "$ext"
 }
 
 discover_config_from_systemd() {
@@ -969,8 +1038,80 @@ generate_template_from_client_config() {
   local template_path="$3"
   case "$adapter_type" in
     singbox) generate_template_from_singbox_config "$source" "$template_path" ;;
+    xray|v2ray) generate_template_from_xray_config "$source" "$template_path" "$adapter_type" ;;
+    tuic) generate_template_from_tuic_config "$source" "$template_path" ;;
     *) die "takeover converter for ${adapter_type} is not implemented yet; rerun with --mode panel-only" ;;
   esac
+}
+
+generate_template_from_xray_config() {
+  local source="$1"
+  local template_path="$2"
+  local adapter_type="${3:-xray}"
+  [ -f "$source" ] || die "${adapter_type} config was not found at ${source}; create it first or rerun with --mode panel-only"
+  backup_file "$template_path"
+  python3 - "$source" "$template_path" <<'PY'
+import json
+import sys
+
+source, output = sys.argv[1], sys.argv[2]
+with open(source, "r", encoding="utf-8") as f:
+    data = json.load(f)
+
+cleared = 0
+for inbound in data.get("inbounds", []) if isinstance(data.get("inbounds"), list) else []:
+    if not isinstance(inbound, dict):
+        continue
+    settings = inbound.get("settings")
+    if isinstance(settings, dict):
+        for key in ("clients", "users"):
+            if isinstance(settings.get(key), list):
+                settings[key] = []
+                cleared += 1
+    for key in ("clients", "users"):
+        if isinstance(inbound.get(key), list):
+            inbound[key] = []
+            cleared += 1
+
+with open(output, "w", encoding="utf-8", newline="\n") as f:
+    json.dump(data, f, ensure_ascii=False, indent=2)
+    f.write("\n")
+print(cleared)
+PY
+  ok "generated ${template_path} from ${source} with ${adapter_type} clients/users cleared"
+}
+
+generate_template_from_tuic_config() {
+  local source="$1"
+  local template_path="$2"
+  [ -f "$source" ] || die "tuic config was not found at ${source}; create it first or rerun with --mode panel-only"
+  backup_file "$template_path"
+  python3 - "$source" "$template_path" <<'PY'
+import json
+import sys
+
+source, output = sys.argv[1], sys.argv[2]
+with open(source, "r", encoding="utf-8") as f:
+    data = json.load(f)
+
+cleared = 0
+if isinstance(data, dict):
+    users = data.get("users")
+    if isinstance(users, (dict, list)):
+        data["users"] = {} if isinstance(users, dict) else []
+        cleared += 1
+    for key in ("clients", "auth", "accounts"):
+        value = data.get(key)
+        if isinstance(value, (dict, list)):
+            data[key] = {} if isinstance(value, dict) else []
+            cleared += 1
+
+with open(output, "w", encoding="utf-8", newline="\n") as f:
+    json.dump(data, f, ensure_ascii=False, indent=2)
+    f.write("\n")
+print(cleared)
+PY
+  ok "generated ${template_path} from ${source} with tuic users/auth accounts cleared"
 }
 
 generate_template_from_singbox_config() {
@@ -1141,6 +1282,7 @@ client_exec_args() {
   local adapter_type="$1"
   case "$adapter_type" in
     singbox) printf 'run -c' ;;
+    xray|v2ray) printf 'run -config' ;;
     *) printf 'run -config' ;;
   esac
 }
@@ -1153,9 +1295,10 @@ write_client_service() {
   local exec_args
   exec_args="$(client_exec_args "$adapter_type")"
   local exec_start_pre=""
-  if [ "$adapter_type" = "singbox" ]; then
-    exec_start_pre="ExecStartPre=${client_bin} check -c ${client_config_path}"
-  fi
+  case "$adapter_type" in
+    singbox) exec_start_pre="ExecStartPre=${client_bin} check -c ${client_config_path}" ;;
+    xray|v2ray) exec_start_pre="ExecStartPre=${client_bin} test -config ${client_config_path}" ;;
+  esac
   backup_file "/etc/systemd/system/${client_service}.service"
   cat > "/etc/systemd/system/${client_service}.service" <<EOF
 [Unit]
@@ -1229,6 +1372,10 @@ validate_client_config() {
       "$client_bin" check -c "$client_config_path" || die "sing-box config validation failed: ${client_config_path}"
       ok "validated sing-box config: ${client_config_path}"
       ;;
+    xray|v2ray)
+      "$client_bin" test -config "$client_config_path" || die "${adapter_type} config validation failed: ${client_config_path}"
+      ok "validated ${adapter_type} config: ${client_config_path}"
+      ;;
     *)
       warn "no config validator is implemented for ${adapter_type}"
       ;;
@@ -1281,9 +1428,6 @@ main() {
   install_mode="$(normalize_mode "$VPNVIEW_MODE")" || die "unsupported install mode: ${VPNVIEW_MODE}"
   log "protocol: ${adapter_type}"
   log "install mode: ${install_mode}"
-  if [ "$install_mode" = "takeover" ] && [ "$adapter_type" != "singbox" ]; then
-    die "takeover for ${adapter_type} is not production-ready yet; rerun with --mode panel-only"
-  fi
 
   local client_config_path=""
   local client_template_path=""
@@ -1306,6 +1450,17 @@ main() {
     ok "dry-run complete; no files were changed"
     return 0
   fi
+  if [ "$install_mode" = "takeover" ]; then
+    case "$adapter_type" in
+      singbox) ;;
+      xray|v2ray)
+        [ "$VPNVIEW_EXPERIMENTAL_TAKEOVER" = "1" ] || die "takeover for ${adapter_type} is experimental; set VPNVIEW_EXPERIMENTAL_TAKEOVER=1 after reviewing backups/rollback, or rerun with --mode panel-only"
+        ;;
+      *)
+        die "takeover for ${adapter_type} is not production-ready yet; rerun with --mode panel-only"
+        ;;
+      esac
+  fi
 
   require_root
   require_command install
@@ -1320,7 +1475,7 @@ main() {
 
   if [ "$install_mode" = "panel-only" ]; then
     warn "panel-only mode: VPNView will be installed without taking over a VPN core service"
-    patch_config "stub" "" "" ""
+    patch_config "stub" "" "" "" "0"
     write_vpnview_service ""
     verify_systemd_units ""
     systemd_start ""
@@ -1338,7 +1493,7 @@ main() {
     fi
     mkdir -p "$client_config_dir"
     generate_template_from_client_config "$adapter_type" "$client_config_path" "$client_template_path"
-    patch_config "$adapter_type" "$client_template_path" "$config_key" "$client_config_path"
+    patch_config "$adapter_type" "$client_template_path" "$config_key" "$client_config_path" "$CONFIG_CREATED"
 
     client_bin="$(find_client_binary "$adapter_type" "$client_service")" || die "${client_service} binary was not found. Install it first, or rerun with VPNVIEW_CLIENT_BIN=/path/to/${client_service}"
     local staging_config_path="${client_config_path}.vpnview.new"
@@ -1357,7 +1512,7 @@ main() {
     systemd_start "$client_service"
   else
     warn "adapter ${adapter_type} does not need a managed VPN client service; only VPNView service will be installed"
-    patch_config "$adapter_type" "" "" ""
+    patch_config "$adapter_type" "" "" "" "$CONFIG_CREATED"
     write_vpnview_service ""
     verify_systemd_units ""
     systemd_start ""

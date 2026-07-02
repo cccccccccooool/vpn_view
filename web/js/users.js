@@ -398,7 +398,7 @@
     const fields = fieldsForCore(coreID);
     return formSection("连接凭据", [
       u().el("div", { class: "form-section-note" }, "按所选核心显示对应字段。"),
-      u().el("div", { id: "credential-fields", class: "form-grid nested-fields" },
+      u().el("div", { id: "credential-fields", class: "form-grid nested-fields full" },
         fields.length ? fields.map(fieldNode) : [u().el("div", { class: "hint" }, "当前核心不需要额外凭据。")]
       )
     ]);

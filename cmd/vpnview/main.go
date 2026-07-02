@@ -168,6 +168,10 @@ func buildDDNSService(cfg *config.Config) *service.DDNSService {
 	if cfg.DDNS == nil || cfg.DDNS.Provider == "" {
 		return nil
 	}
+	if cfg.DDNS.Domain == "" || cfg.DDNS.ZoneID == "" || cfg.DDNS.RecordID == "" || cfg.DDNS.APIToken == "" {
+		slog.Warn("DDNS disabled because required Cloudflare fields are incomplete")
+		return nil
+	}
 	switch strings.ToLower(cfg.DDNS.Provider) {
 	case "cloudflare":
 		return service.NewDDNSService(cloudflare.New(cfg.DDNS), cfg.DDNS, cfg.GetDDNSCheckInterval())
