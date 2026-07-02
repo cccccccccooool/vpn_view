@@ -92,13 +92,22 @@ limits:
   software_limit_strikes: 3
 
 security:
+  # deployment_mode controls browser transport assumptions:
+  #   insecure    - no domain/certificate; HTTP admin panel is allowed, Secure cookies and HSTS are disabled.
+  #   self_signed - HTTPS is used with a self-signed/private certificate or a reverse proxy; Secure cookies follow HTTPS.
+  #   strict      - production HTTPS; Secure cookies are always set and HSTS can be enabled.
+  deployment_mode: "insecure"
+  # cookie_secure: auto follows deployment_mode. Use always behind HTTPS reverse proxies, never for HTTP-only private panels.
+  cookie_secure: "auto"
   csp: "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'"
-  hsts_enabled: true
+  hsts_enabled: false
   hsts_max_age: 31536000
   hsts_include_subdomains: true
   hsts_preload: false
 
 subscription:
+  # Panel transport security does not rewrite node subscription schemes.
+  # Each core's subscription_domain / subscription_port / subscription_tls controls generated node links.
   mode: "link"
   domain: "vpn.example.com"
   template_path: ""

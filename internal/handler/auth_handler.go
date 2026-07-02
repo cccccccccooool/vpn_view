@@ -4,21 +4,22 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
-	"net"
 	"net/http"
 	"strings"
 	"time"
 
 	"vpnview/internal/auth"
+	"vpnview/internal/config"
 )
 
 type AuthHandler struct {
 	authSvc *auth.JWTService
 	blocker *auth.IPBlocker
+	sec     config.SecurityConfig
 }
 
-func NewAuthHandler(authSvc *auth.JWTService, blocker *auth.IPBlocker) *AuthHandler {
-	return &AuthHandler{authSvc: authSvc, blocker: blocker}
+func NewAuthHandler(authSvc *auth.JWTService, blocker *auth.IPBlocker, sec config.SecurityConfig) *AuthHandler {
+	return &AuthHandler{authSvc: authSvc, blocker: blocker, sec: sec}
 }
 
 func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
@@ -48,13 +49,13 @@ func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
 	if maxAge < 0 {
 		maxAge = 0
 	}
-	secure := shouldUseSecureCookie(r)
+	secure := shouldUseSecureCookie(r, h.sec)
 	csrfToken := randomToken()
 
 	http.SetCookie(w, &http.Cookie{
 		Name:     sessionCookieName,
 		Value:    token,
-		Path:     "/api/",
+		Path:     cookiePath(sessionCookieName),
 		MaxAge:   maxAge,
 		HttpOnly: true,
 		Secure:   secure,
@@ -63,7 +64,7 @@ func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
 	http.SetCookie(w, &http.Cookie{
 		Name:     csrfCookieName,
 		Value:    csrfToken,
-		Path:     "/api/",
+		Path:     cookiePath(csrfCookieName),
 		MaxAge:   maxAge,
 		HttpOnly: false,
 		Secure:   secure,
@@ -78,12 +79,12 @@ func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *AuthHandler) Logout(w http.ResponseWriter, r *http.Request) {
-	secure := shouldUseSecureCookie(r)
+	secure := shouldUseSecureCookie(r, h.sec)
 	for _, name := range []string{sessionCookieName, csrfCookieName} {
 		http.SetCookie(w, &http.Cookie{
 			Name:     name,
 			Value:    "",
-			Path:     "/api/",
+			Path:     cookiePath(name),
 			MaxAge:   -1,
 			HttpOnly: name == sessionCookieName,
 			Secure:   secure,
@@ -93,16 +94,39 @@ func (h *AuthHandler) Logout(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
-func shouldUseSecureCookie(r *http.Request) bool {
+func cookiePath(name string) string {
+	if name == csrfCookieName {
+		return "/"
+	}
+	return "/api/"
+}
+
+func shouldUseSecureCookie(r *http.Request, sec config.SecurityConfig) bool {
+	switch sec.CookieSecure {
+	case "always":
+		return true
+	case "never":
+		return false
+	}
+	switch sec.DeploymentMode {
+	case "strict":
+		return true
+	case "self_signed":
+		return requestIsHTTPS(r)
+	default:
+		return false
+	}
+}
+
+func requestIsHTTPS(r *http.Request) bool {
 	if r.TLS != nil {
 		return true
 	}
-	host := r.Host
-	if h, _, err := net.SplitHostPort(host); err == nil {
-		host = h
-	}
-	host = strings.Trim(host, "[]")
-	return host != "" && host != "localhost" && host != "127.0.0.1" && host != "::1"
+	cfVisitor := strings.ToLower(r.Header.Get("CF-Visitor"))
+	return strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https") ||
+		strings.EqualFold(r.Header.Get("X-Forwarded-Ssl"), "on") ||
+		strings.Contains(cfVisitor, `"scheme":"https"`) ||
+		strings.Contains(cfVisitor, `"scheme": "https"`)
 }
 
 func randomToken() string {

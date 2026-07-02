@@ -77,6 +77,8 @@ type LimitsConfig struct {
 
 type SecurityConfig struct {
 	CSP                   string `yaml:"csp"`
+	DeploymentMode        string `yaml:"deployment_mode"`
+	CookieSecure          string `yaml:"cookie_secure"`
 	HSTSEnabled           bool   `yaml:"hsts_enabled"`
 	HSTSMaxAge            int    `yaml:"hsts_max_age"`
 	HSTSIncludeSubDomains bool   `yaml:"hsts_include_subdomains"`
@@ -175,8 +177,41 @@ func (c *Config) normalizeSecurity() {
 	if c.Security.CSP == "" {
 		c.Security.CSP = "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'"
 	}
+	rawDeploymentMode := strings.TrimSpace(strings.ToLower(c.Security.DeploymentMode))
+	switch rawDeploymentMode {
+	case "":
+		if c.Security.HSTSEnabled {
+			c.Security.DeploymentMode = "strict"
+		} else if c.Server.TLS.Enabled {
+			c.Security.DeploymentMode = "self_signed"
+		} else {
+			c.Security.DeploymentMode = "insecure"
+		}
+	case "off", "none", "http", "insecure":
+		c.Security.DeploymentMode = "insecure"
+	case "self-signed", "self_signed", "selfsigned", "local-https", "local_https":
+		c.Security.DeploymentMode = "self_signed"
+	case "strict", "production", "https":
+		c.Security.DeploymentMode = "strict"
+	default:
+		c.Security.DeploymentMode = "insecure"
+	}
+	c.Security.CookieSecure = strings.TrimSpace(strings.ToLower(c.Security.CookieSecure))
+	switch c.Security.CookieSecure {
+	case "", "auto":
+		c.Security.CookieSecure = "auto"
+	case "always", "true", "on", "secure":
+		c.Security.CookieSecure = "always"
+	case "never", "false", "off", "insecure":
+		c.Security.CookieSecure = "never"
+	default:
+		c.Security.CookieSecure = "auto"
+	}
 	if c.Security.HSTSMaxAge <= 0 {
 		c.Security.HSTSMaxAge = 31536000
+	}
+	if c.Security.DeploymentMode == "insecure" {
+		c.Security.HSTSEnabled = false
 	}
 }
 

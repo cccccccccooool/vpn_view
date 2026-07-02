@@ -26,7 +26,7 @@ func NewRouter(
 ) http.Handler {
 	mux := http.NewServeMux()
 
-	authH := NewAuthHandler(authSvc, blocker)
+	authH := NewAuthHandler(authSvc, blocker, cfg.Security)
 	userH := NewUserHandler(userSvc, trafficSvc)
 	statsH := NewStatsHandler(trafficSvc)
 	capH := NewCapabilityHandler(cores, cfg)

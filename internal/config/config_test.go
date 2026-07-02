@@ -117,6 +117,7 @@ func TestLoadNormalizesSecurityAndDDNS(t *testing.T) {
 adapter:
   type: "stub"
 security:
+  deployment_mode: "strict"
   hsts_enabled: true
 ddns:
   provider: "CloudFlare"
@@ -136,6 +137,12 @@ ddns:
 	if cfg.Security.CSP == "" {
 		t.Fatalf("security CSP should default")
 	}
+	if cfg.Security.DeploymentMode != "strict" {
+		t.Fatalf("deployment mode = %q, want strict", cfg.Security.DeploymentMode)
+	}
+	if cfg.Security.CookieSecure != "auto" {
+		t.Fatalf("cookie secure = %q, want auto", cfg.Security.CookieSecure)
+	}
 	if !cfg.Security.HSTSEnabled {
 		t.Fatalf("explicit HSTS setting should be preserved")
 	}
@@ -153,5 +160,35 @@ ddns:
 	}
 	if len(cfg.DDNS.IPCheckURLs) == 0 {
 		t.Fatalf("DDNS IP resolvers should default")
+	}
+}
+
+func TestLoadInsecureDeploymentDisablesHSTS(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	data := []byte(`
+adapter:
+  type: "stub"
+security:
+  deployment_mode: "insecure"
+  cookie_secure: "never"
+  hsts_enabled: true
+`)
+	if err := os.WriteFile(path, data, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Security.DeploymentMode != "insecure" {
+		t.Fatalf("deployment mode = %q, want insecure", cfg.Security.DeploymentMode)
+	}
+	if cfg.Security.CookieSecure != "never" {
+		t.Fatalf("cookie secure = %q, want never", cfg.Security.CookieSecure)
+	}
+	if cfg.Security.HSTSEnabled {
+		t.Fatalf("insecure deployment should disable HSTS")
 	}
 }

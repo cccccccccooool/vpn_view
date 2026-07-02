@@ -533,8 +533,10 @@ limits:
   software_limit_strikes: 3
 
 security:
+  deployment_mode: "insecure"
+  cookie_secure: "auto"
   csp: "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'"
-  hsts_enabled: true
+  hsts_enabled: false
   hsts_max_age: 31536000
   hsts_include_subdomains: true
   hsts_preload: false

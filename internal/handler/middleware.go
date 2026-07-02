@@ -70,7 +70,7 @@ func SecurityHeadersMiddleware(sec config.SecurityConfig, next http.Handler) htt
 		h.Set("Referrer-Policy", "no-referrer")
 		h.Set("Permissions-Policy", "clipboard-read=(), geolocation=(), microphone=(), camera=()")
 		h.Set("X-Frame-Options", "DENY")
-		if r.TLS != nil && sec.HSTSEnabled {
+		if sec.DeploymentMode != "insecure" && requestIsHTTPS(r) && sec.HSTSEnabled {
 			h.Set("Strict-Transport-Security", hstsValue(sec))
 		}
 		next.ServeHTTP(w, r)
