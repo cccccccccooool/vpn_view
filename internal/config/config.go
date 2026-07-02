@@ -126,7 +126,7 @@ func MustLoad(path string) *Config {
 
 func (c *Config) applyDefaults() {
 	if c.Server.Listen == "" {
-		c.Server.Listen = "0.0.0.0:19463"
+		c.Server.Listen = "0.0.0.0:8443"
 	}
 	if c.Auth.Secret == "" {
 		c.Auth.Secret = "change-me"

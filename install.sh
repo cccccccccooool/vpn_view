@@ -485,7 +485,7 @@ create_default_config() {
   local secret="$1"
   cat > "$CONFIG_FILE" <<EOF
 server:
-  listen: "0.0.0.0:19463"
+  listen: "0.0.0.0:8443"
   tls:
     enabled: false
     cert_file: ""

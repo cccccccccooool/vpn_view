@@ -97,12 +97,10 @@ func shouldUseSecureCookie(r *http.Request) bool {
 	if r.TLS != nil {
 		return true
 	}
-	host := r.Host
-	if h, _, err := net.SplitHostPort(host); err == nil {
-		host = h
+	if r.Header.Get("X-Forwarded-Proto") == "https" {
+		return true
 	}
-	host = strings.Trim(host, "[]")
-	return host != "" && host != "localhost" && host != "127.0.0.1" && host != "::1"
+	return false
 }
 
 func randomToken() string {
