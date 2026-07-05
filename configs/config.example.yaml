@@ -21,6 +21,8 @@ adapter:
   # reload_command: "systemctl reload sing-box"
   # clash_api: "http://127.0.0.1:9090"
   # clash_secret: ""
+  # v2ray_api is sing-box's V2Ray Stats API compatibility endpoint, not a V2Ray core selector.
+  # It requires a sing-box build with with_v2ray_api for takeover traffic stats.
   # v2ray_api: "127.0.0.1:10085"
   # subscription_domain: "vpn.example.com"
   # subscription_port: 443
@@ -53,6 +55,8 @@ cores:
   #       reload_command: "systemctl reload sing-box"
   #       clash_api: "http://127.0.0.1:9090"
   #       clash_secret: ""
+  #       # v2ray_api is sing-box's V2Ray Stats API compatibility endpoint, not a V2Ray core selector.
+  #       # It requires a sing-box build with with_v2ray_api for takeover traffic stats.
   #       v2ray_api: "127.0.0.1:10085"
   #       subscription_domain: "vpn.example.com"
   #       subscription_port: 443

@@ -46,8 +46,8 @@ func NewGRPCTrafficReader(address string) (*GRPCTrafficReader, error) {
 
 // QueryTraffic 发起 gRPC 请求，拉取所有以 `user>>>` 前缀匹配的流量统计报表。
 // 数据流与精密度：
-//  - 这是 Sing-box 原生提供的最精准的累计统计方案（不会发生漏记）。
-//  - 获取数据后解析 `user>>>[UserID]>>>traffic>>>uplink|downlink` 指标并汇总返回。
+//   - 这是 Sing-box 原生提供的最精准的累计统计方案（不会发生漏记）。
+//   - 获取数据后解析 `user>>>[UserID]>>>traffic>>>uplink|downlink` 指标并汇总返回。
 func (r *GRPCTrafficReader) QueryTraffic(ctx context.Context) ([]port.TrafficSnapshot, error) {
 	req := &QueryStatsRequest{
 		Pattern: "user>>>",
@@ -56,7 +56,7 @@ func (r *GRPCTrafficReader) QueryTraffic(ctx context.Context) ([]port.TrafficSna
 	var resp QueryStatsResponse
 	// 🏆 巧妙之处：利用 legacyProtoCodec 自定义编解码，完美兼容 Go 较新 grpc 库下编解码 v1 proto 的兼容问题
 	if err := r.conn.Invoke(ctx, statsServiceQueryMethod, req, &resp, grpc.ForceCodec(legacyProtoCodec{})); err != nil {
-		return nil, err
+		return nil, explainV2RayAPIError(err)
 	}
 
 	byUser := make(map[string]*port.TrafficSnapshot)
@@ -82,6 +82,23 @@ func (r *GRPCTrafficReader) QueryTraffic(ctx context.Context) ([]port.TrafficSna
 		out = append(out, *snap)
 	}
 	return out, nil
+}
+
+func explainV2RayAPIError(err error) error {
+	if err == nil {
+		return nil
+	}
+	msg := strings.ToLower(err.Error())
+	switch {
+	case strings.Contains(msg, "connection refused"):
+		return fmt.Errorf("sing-box V2Ray Stats API 不可用：%w。请确认 experimental.v2ray_api 已启用、127.0.0.1:10085 正在监听，并确认 sing-box 构建包含 with_v2ray_api", err)
+	case strings.Contains(msg, "deadline exceeded"), strings.Contains(msg, "i/o timeout"):
+		return fmt.Errorf("sing-box V2Ray Stats API 连接超时：%w。请检查 v2ray_api 地址、核心服务状态和本机防火墙", err)
+	case strings.Contains(msg, "unimplemented"), strings.Contains(msg, "unknown service"):
+		return fmt.Errorf("sing-box V2Ray Stats API 方法不可用：%w。当前核心可能未启用 experimental.v2ray_api 或不包含 with_v2ray_api", err)
+	default:
+		return fmt.Errorf("sing-box V2Ray Stats API 查询失败：%w", err)
+	}
 }
 
 // Close 关闭与 Sing-box API 端的物理 gRPC 长连接。

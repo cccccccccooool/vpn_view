@@ -24,6 +24,8 @@ VPNVIEW_CLIENT_SERVICE="${VPNVIEW_CLIENT_SERVICE:-}"
 VPNVIEW_PROTOCOL="${VPNVIEW_PROTOCOL:-}"
 VPNVIEW_MODE="${VPNVIEW_MODE:-takeover}"
 VPNVIEW_EXPERIMENTAL_TAKEOVER="${VPNVIEW_EXPERIMENTAL_TAKEOVER:-0}"
+VPNVIEW_INTERACTIVE="${VPNVIEW_INTERACTIVE:-0}"
+VPNVIEW_INSTALL_CORE="${VPNVIEW_INSTALL_CORE:-0}"
 SINGBOX_BIN="${SINGBOX_BIN:-}"
 SKIP_DOWNLOAD="${SKIP_DOWNLOAD:-0}"
 
@@ -53,6 +55,7 @@ usage() {
     "  sudo bash install.sh" \
     "  sudo bash install.sh --local ./vpnview-linux-amd64" \
     "  sudo bash install.sh --protocol singbox --mode takeover" \
+    "  sudo bash install.sh --interactive" \
     "  sudo env VPNVIEW_PROTOCOL=singbox bash install.sh" \
     "  curl -fsSL https://raw.githubusercontent.com/<owner>/vpn_view/main/install.sh | sudo env VPNVIEW_REPO=<owner>/vpn_view bash" \
     "" \
@@ -62,6 +65,8 @@ usage() {
     "  --version TAG      Release tag. Defaults to latest." \
     "  --protocol NAME    VPN core/protocol to manage: singbox, xray, v2ray, mihomo, hysteria2, tuic, stub." \
     "  --mode MODE        takeover, panel-only, or dry-run. Defaults to takeover." \
+    "  --interactive      Prompt for protocol and install mode when possible." \
+    "  --install-core     Reserved for installing a VPNView-compatible core build; currently fails unless documented support is added." \
     "  --skip-download    Do not download a binary; require an existing local binary." \
     "  -h, --help         Show this help." \
     "" \
@@ -74,6 +79,8 @@ usage() {
     "  VPNVIEW_CLIENT_SERVICE Override the managed VPN client systemd service name." \
     "  VPNVIEW_PROTOCOL   Non-interactive protocol selection." \
     "  VPNVIEW_MODE       takeover, panel-only, or dry-run." \
+    "  VPNVIEW_INTERACTIVE=1 enables prompts in TTY environments." \
+    "  VPNVIEW_INSTALL_CORE=1 requests managed core installation when supported." \
     "  VPNVIEW_EXPERIMENTAL_TAKEOVER=1 allows xray/v2ray takeover while converters are still being hardened." \
     "  SINGBOX_BIN        sing-box binary path if it is not in PATH."
 }
@@ -803,6 +810,29 @@ normalize_mode() {
   esac
 }
 
+choose_mode() {
+  local current
+  current="$(normalize_mode "$VPNVIEW_MODE")" || die "unsupported install mode: ${VPNVIEW_MODE}"
+  if [ "$VPNVIEW_INTERACTIVE" != "1" ] || [ ! -t 0 ]; then
+    printf '%s' "$current"
+    return 0
+  fi
+  printf '%s\n' \
+    "Please select install mode:" \
+    "  1) takeover   manage VPNView and take over the selected core" \
+    "  2) panel-only install VPNView panel only" \
+    "  3) dry-run    print plan without writing files" >&2
+  printf 'Enter number or mode [%s]: ' "$current" >&2
+  local raw
+  read -r raw
+  case "$raw" in
+    "") raw="$current" ;;
+    1) raw="takeover" ;;
+    2) raw="panel-only" ;;
+    3) raw="dry-run" ;;
+  esac
+  normalize_mode "$raw" || die "unsupported install mode: ${raw}"
+}
 print_install_plan() {
   local mode="$1"
   local protocol="$2"
@@ -1034,6 +1064,105 @@ create_minimal_singbox_template() {
 EOF
 }
 
+preflight_singbox_v2ray_api() {
+  local client_bin="$1"
+  local tmp
+  tmp="$(mktemp)"
+  record_manifest_temp "$tmp"
+  cat > "$tmp" <<'EOF'
+{
+  "log": {"level": "error"},
+  "experimental": {
+    "v2ray_api": {
+      "listen": "127.0.0.1:10085",
+      "stats": {"enabled": true}
+    }
+  },
+  "inbounds": [
+    {
+      "type": "shadowsocks",
+      "tag": "vpnview-preflight-ss",
+      "listen": "127.0.0.1",
+      "listen_port": 18080,
+      "method": "2022-blake3-aes-128-gcm",
+      "password": "vpnview-preflight-password"
+    }
+  ],
+  "outbounds": [
+    {"type": "direct", "tag": "direct"}
+  ]
+}
+EOF
+  local output
+  if output="$($client_bin check -c "$tmp" 2>&1)"; then
+    ok "sing-box build supports experimental.v2ray_api"
+    rm -f "$tmp"
+    return 0
+  fi
+  printf '%s\n' "$output" >&2
+  case "$(printf '%s' "$output" | tr '[:upper:]' '[:lower:]')" in
+    *"v2ray api is not included"*|*"with_v2ray_api"*|*"v2ray_api"*)
+      die "current sing-box build does not include with_v2ray_api; VPNView sing-box takeover requires the compatible V2Ray Stats API build. Install a compatible build or rerun with --mode panel-only."
+      ;;
+  esac
+  die "sing-box v2ray_api compatibility preflight failed"
+}
+
+preflight_core() {
+  local adapter_type="$1"
+  local client_bin="$2"
+  local install_mode="$3"
+  [ "$install_mode" = "takeover" ] || return 0
+  case "$adapter_type" in
+    singbox)
+      [ -x "$client_bin" ] || die "sing-box binary was not found. Install a VPNView-compatible sing-box first, or rerun with VPNVIEW_CLIENT_BIN=/path/to/sing-box, or use --mode panel-only."
+      "$client_bin" version 2>/dev/null | head -n 1 | sed 's/^/[INFO] sing-box version: /' || true
+      preflight_singbox_v2ray_api "$client_bin"
+      ;;
+  esac
+}
+
+port_in_use() {
+  local host_port="$1"
+  local port="${host_port##*:}"
+  [ -n "$port" ] || return 1
+  if command -v ss >/dev/null 2>&1; then
+    ss -lnt 2>/dev/null | awk '{print $4}' | grep -Eq "(^|:)${port}$"
+    return $?
+  fi
+  if command -v netstat >/dev/null 2>&1; then
+    netstat -lnt 2>/dev/null | awk '{print $4}' | grep -Eq "(^|:)${port}$"
+    return $?
+  fi
+  return 1
+}
+
+print_port_plan() {
+  local adapter_type="$1"
+  local panel_listen="0.0.0.0:19463"
+  local core_api=""
+  local default_inbound=""
+  case "$adapter_type" in
+    singbox)
+      core_api="127.0.0.1:10085"
+      default_inbound="[::]:1443 when minimal template is generated; existing takeover configs keep their original listen_port"
+      ;;
+  esac
+  printf '\nPort plan:\n'
+  printf '  panel:       %s (public only if you expose it)\n' "$panel_listen"
+  if [ -n "$core_api" ]; then
+    printf '  core API:    %s (localhost only; never open to the internet)\n' "$core_api"
+  fi
+  if [ -n "$default_inbound" ]; then
+    printf '  core inbound:%s\n' " $default_inbound"
+  fi
+  if port_in_use "$panel_listen"; then
+    warn "panel port appears to be in use: ${panel_listen}"
+  fi
+  if [ -n "$core_api" ] && port_in_use "$core_api"; then
+    warn "core API port appears to be in use: ${core_api}"
+  fi
+}
 generate_template_from_client_config() {
   local adapter_type="$1"
   local source="$2"
@@ -1262,6 +1391,8 @@ write_vpnview_service() {
 Description=VPNView Admin Panel
 After=${after}
 Wants=${wants}
+StartLimitIntervalSec=60
+StartLimitBurst=10
 
 [Service]
 Type=simple
@@ -1269,8 +1400,6 @@ ExecStart=${INSTALL_BIN} -config ${CONFIG_FILE}
 WorkingDirectory=${ETC_DIR}
 Restart=always
 RestartSec=5s
-StartLimitIntervalSec=60
-StartLimitBurst=10
 LimitNOFILE=1048576
 NoNewPrivileges=true
 
@@ -1307,6 +1436,8 @@ write_client_service() {
 Description=${client_service} service
 After=network-online.target nss-lookup.target
 Wants=network-online.target
+StartLimitIntervalSec=60
+StartLimitBurst=10
 
 [Service]
 Type=simple
@@ -1316,8 +1447,6 @@ ${exec_start_pre}
 ExecStart=${client_bin} ${exec_args} ${client_config_path}
 Restart=always
 RestartSec=5s
-StartLimitIntervalSec=60
-StartLimitBurst=10
 LimitNOFILE=1048576
 NoNewPrivileges=true
 
@@ -1427,7 +1556,7 @@ main() {
   local adapter_type
   local install_mode
   adapter_type="$(choose_protocol)"
-  install_mode="$(normalize_mode "$VPNVIEW_MODE")" || die "unsupported install mode: ${VPNVIEW_MODE}"
+  install_mode="$(choose_mode)"
   log "protocol: ${adapter_type}"
   log "install mode: ${install_mode}"
 
@@ -1448,6 +1577,7 @@ main() {
     client_bin="$(find_client_binary "$adapter_type" "$client_service")" || true
   fi
   print_install_plan "$install_mode" "$adapter_type" "$adapter_type" "${adapter_type}-main" "$client_service" "$client_config_path" "$client_template_path" "$client_bin"
+  print_port_plan "$adapter_type"
   if [ "$install_mode" = "dry-run" ]; then
     ok "dry-run complete; no files were changed"
     return 0
@@ -1462,6 +1592,10 @@ main() {
         die "takeover for ${adapter_type} is not production-ready yet; rerun with --mode panel-only"
         ;;
       esac
+  fi
+
+  if [ "$VPNVIEW_INSTALL_CORE" = "1" ]; then
+    die "--install-core is reserved but not implemented yet; install a VPNView-compatible sing-box manually and pass VPNVIEW_CLIENT_BIN=/path/to/sing-box, or use --mode panel-only"
   fi
 
   require_root
@@ -1494,10 +1628,10 @@ main() {
       record_manifest_dir "$client_config_dir"
     fi
     mkdir -p "$client_config_dir"
+    client_bin="$(find_client_binary "$adapter_type" "$client_service")" || die "${client_service} binary was not found. Install it first, or rerun with VPNVIEW_CLIENT_BIN=/path/to/${client_service}, or use --mode panel-only"
+    preflight_core "$adapter_type" "$client_bin" "$install_mode"
     generate_template_from_client_config "$adapter_type" "$client_config_path" "$client_template_path"
     patch_config "$adapter_type" "$client_template_path" "$config_key" "$client_config_path" "$CONFIG_CREATED"
-
-    client_bin="$(find_client_binary "$adapter_type" "$client_service")" || die "${client_service} binary was not found. Install it first, or rerun with VPNVIEW_CLIENT_BIN=/path/to/${client_service}"
     local staging_config_path="${client_config_path}.vpnview.new"
     record_manifest_temp "$staging_config_path"
     local init_config
