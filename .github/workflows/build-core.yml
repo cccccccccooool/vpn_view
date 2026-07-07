@@ -108,7 +108,7 @@ jobs:
           cp vpnview-repo/THIRD_PARTY_NOTICES.md ./THIRD_PARTY_NOTICES.md
 
       - name: Release Assets
-        uses: softprops/action-gh-release@c062e0eec596a5d7c013b247507bb5865ade4762 # v2.0.1
+        uses: softprops/action-gh-release@da05d552573ad5aba039eaac05058a918a7bf631 # v2.2.2
         if: startsWith(github.ref, 'refs/tags/')
         with:
           files: |
