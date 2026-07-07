@@ -66,7 +66,8 @@ usage() {
     "  --protocol NAME    VPN core/protocol to manage: singbox, xray, v2ray, mihomo, hysteria2, tuic, stub." \
     "  --mode MODE        takeover, panel-only, or dry-run. Defaults to takeover." \
     "  --interactive      Prompt for protocol and install mode when possible." \
-    "  --install-core     Reserved for installing a VPNView-compatible core build; currently fails unless documented support is added." \
+    "  --install-core     Install the unofficial compatible VPN core (sing-box) for takeover." \
+    "  --no-install-core  Do not install the unofficial compatible VPN core." \
     "  --skip-download    Do not download a binary; require an existing local binary." \
     "  -h, --help         Show this help." \
     "" \
@@ -111,6 +112,18 @@ while [ $# -gt 0 ]; do
       [ $# -ge 2 ] || die "--mode requires takeover, panel-only, or dry-run"
       VPNVIEW_MODE="$2"
       shift 2
+      ;;
+    --interactive)
+      VPNVIEW_INTERACTIVE=1
+      shift
+      ;;
+    --install-core)
+      VPNVIEW_INSTALL_CORE=1
+      shift
+      ;;
+    --no-install-core)
+      VPNVIEW_INSTALL_CORE=0
+      shift
       ;;
     --skip-download)
       SKIP_DOWNLOAD=1
@@ -1085,7 +1098,7 @@ preflight_singbox_v2ray_api() {
       "listen": "127.0.0.1",
       "listen_port": 18080,
       "method": "2022-blake3-aes-128-gcm",
-      "password": "vpnview-preflight-password"
+      "password": "cGFzc3dvcmQxMjM0NTY3OA=="
     }
   ],
   "outbounds": [
@@ -1121,6 +1134,185 @@ preflight_core() {
       ;;
   esac
 }
+
+preflight_singbox_v2ray_api_silent() {
+  local client_bin="$1"
+  local tmp
+  tmp="$(mktemp)"
+  cat > "$tmp" <<'EOF'
+{
+  "log": {"level": "error"},
+  "experimental": {
+    "v2ray_api": {
+      "listen": "127.0.0.1:10085",
+      "stats": {"enabled": true}
+    }
+  },
+  "inbounds": [
+    {
+      "type": "shadowsocks",
+      "tag": "vpnview-preflight-ss",
+      "listen": "127.0.0.1",
+      "listen_port": 18080,
+      "method": "2022-blake3-aes-128-gcm",
+      "password": "cGFzc3dvcmQxMjM0NTY3OA=="
+    }
+  ],
+  "outbounds": [
+    {"type": "direct", "tag": "direct"}
+  ]
+}
+EOF
+  local output
+  if output="$("$client_bin" check -c "$tmp" 2>&1)"; then
+    rm -f "$tmp"
+    return 0
+  fi
+  rm -f "$tmp"
+  return 1
+}
+
+show_unofficial_disclaimer() {
+  printf '%s\n' \
+    "============================================================" \
+    "          UNOFFICIAL COMPATIBLE CORE DISCLAIMER             " \
+    "============================================================" \
+    "This is an unofficial compatibility build compiled from      " \
+    "SagerNet/sing-box with the with_v2ray_api build tag for     " \
+    "VPNView integration.                                        " \
+    "                                                            " \
+    "It is not an official SagerNet release and is not affiliated" \
+    "with, endorsed by, or supported by SagerNet.                " \
+    "                                                            " \
+    "这是基于 SagerNet/sing-box 源码、启用 with_v2ray_api 编译标签" \
+    "生成的 VPNView 非官方兼容构建。本构建并非 SagerNet 官方发行" \
+    "版，也不代表获得 SagerNet 的关联、认可或支持。               " \
+    "                                                            " \
+    "Upstream: SagerNet/sing-box                                 " \
+    "Version:  v1.9.3                                            " \
+    "License:  GPL-3.0-or-later                                  " \
+    "============================================================" >&2
+}
+
+install_compatible_core() {
+  local adapter_type="$1"
+  local client_service="$2"
+  local arch
+  arch="$(detect_arch)"
+  
+  show_unofficial_disclaimer
+  log "installing compatible sing-box core for ${arch}..."
+
+  local target_path=""
+  if [ -n "$VPNVIEW_CLIENT_BIN" ]; then
+    target_path="$VPNVIEW_CLIENT_BIN"
+  else
+    target_path="/usr/local/bin/sing-box"
+  fi
+
+  local tmp_bin
+  local tmp_sums
+  tmp_bin="$(mktemp)"
+  tmp_sums="$(mktemp)"
+
+  local base_url="${VPNVIEW_DOWNLOAD_BASE_URL:-https://github.com/${VPNVIEW_REPO}/releases/latest/download}"
+  if [ -z "$VPNVIEW_DOWNLOAD_BASE_URL" ] && [ "$VPNVIEW_VERSION" != "latest" ]; then
+    base_url="https://github.com/${VPNVIEW_REPO}/releases/download/${VPNVIEW_VERSION}"
+  fi
+
+  local bin_url="${base_url}/vpnview-core-linux-${arch}"
+  local sums_url="${base_url}/SHA256SUMS"
+
+  require_command curl
+
+  log "downloading core binary from ${bin_url}..."
+  curl -fL --retry 3 --connect-timeout 15 -o "$tmp_bin" "$bin_url" || {
+    rm -f "$tmp_bin" "$tmp_sums"
+    die "failed to download compatible core binary from ${bin_url}"
+  }
+
+  log "downloading checksums from ${sums_url}..."
+  curl -fL --retry 3 --connect-timeout 15 -o "$tmp_sums" "$sums_url" || {
+    rm -f "$tmp_bin" "$tmp_sums"
+    die "failed to download checksums from ${sums_url}"
+  }
+
+  log "verifying SHA-256 checksum..."
+  local expected_hash
+  expected_hash="$(grep "vpnview-core-linux-${arch}" "$tmp_sums" | awk '{print $1}')"
+  if [ -z "$expected_hash" ]; then
+    rm -f "$tmp_bin" "$tmp_sums"
+    die "could not find expected checksum for vpnview-core-linux-${arch} in SHA256SUMS"
+  fi
+
+  local actual_hash
+  if command -v sha256sum >/dev/null 2>&1; then
+    actual_hash="$(sha256sum "$tmp_bin" | awk '{print $1}')"
+  elif command -v shasum >/dev/null 2>&1; then
+    actual_hash="$(shasum -a 256 "$tmp_bin" | awk '{print $1}')"
+  else
+    warn "no sha256sum or shasum command found; skipping validation"
+    actual_hash="$expected_hash"
+  fi
+
+  if [ "$actual_hash" != "$expected_hash" ]; then
+    rm -f "$tmp_bin" "$tmp_sums"
+    die "SHA-256 validation failed! Expected: ${expected_hash}, Actual: ${actual_hash}"
+  fi
+  ok "SHA-256 checksum validated successfully"
+
+  if [ -e "$target_path" ]; then
+    backup_file "$target_path"
+  fi
+
+  mkdir -p "$(dirname "$target_path")"
+  install -m 0755 "$tmp_bin" "$target_path" || {
+    rm -f "$tmp_bin" "$tmp_sums"
+    die "failed to install compatible core binary to ${target_path}"
+  }
+  rm -f "$tmp_bin" "$tmp_sums"
+  ok "installed compatible core to ${target_path}"
+}
+
+check_and_install_core_if_needed() {
+  local adapter_type="$1"
+  local client_service="$2"
+  local install_mode="$3"
+
+  [ "$install_mode" = "takeover" ] || return 0
+  if [ "$adapter_type" != "singbox" ]; then
+    return 0
+  fi
+
+  local client_bin=""
+  if client_bin="$(find_client_binary "$adapter_type" "$client_service")"; then
+    if preflight_singbox_v2ray_api_silent "$client_bin"; then
+      log "existing sing-box is already compatible; skipping core installation"
+      return 0
+    fi
+  fi
+
+  local do_install=0
+  if [ "$VPNVIEW_INSTALL_CORE" = "1" ]; then
+    do_install=1
+  elif [ "$VPNVIEW_INTERACTIVE" = "1" ] && [ -t 0 ]; then
+    show_unofficial_disclaimer
+    printf 'Do you want to download and install the unofficial compatible sing-box core? [y/N]: ' >&2
+    local choice
+    read -r choice
+    case "$choice" in
+      [yY]|[yY][eE][sS]) do_install=1 ;;
+      *) do_install=0 ;;
+    esac
+  fi
+
+  if [ "$do_install" = "0" ]; then
+    die "Compatible sing-box (compiled with with_v2ray_api tag) is required for takeover mode. Install it manually, pass VPNVIEW_CLIENT_BIN=/path/to/sing-box, rerun with --install-core to download the compatible core, or use --mode panel-only."
+  fi
+
+  install_compatible_core "$adapter_type" "$client_service"
+}
+
 
 port_in_use() {
   local host_port="$1"
@@ -1574,14 +1766,8 @@ main() {
     client_service="$(client_service_name "$adapter_type")"
     client_config_path="$(locate_client_config "$adapter_type" "$client_service" "$configured_path")"
     client_template_path="$(template_file_for_adapter "$adapter_type")"
-    client_bin="$(find_client_binary "$adapter_type" "$client_service")" || true
   fi
-  print_install_plan "$install_mode" "$adapter_type" "$adapter_type" "${adapter_type}-main" "$client_service" "$client_config_path" "$client_template_path" "$client_bin"
-  print_port_plan "$adapter_type"
-  if [ "$install_mode" = "dry-run" ]; then
-    ok "dry-run complete; no files were changed"
-    return 0
-  fi
+
   if [ "$install_mode" = "takeover" ]; then
     case "$adapter_type" in
       singbox) ;;
@@ -1591,14 +1777,26 @@ main() {
       *)
         die "takeover for ${adapter_type} is not production-ready yet; rerun with --mode panel-only"
         ;;
-      esac
+    esac
   fi
 
-  if [ "$VPNVIEW_INSTALL_CORE" = "1" ]; then
-    die "--install-core is reserved but not implemented yet; install a VPNView-compatible sing-box manually and pass VPNVIEW_CLIENT_BIN=/path/to/sing-box, or use --mode panel-only"
+  if [ "$install_mode" != "dry-run" ]; then
+    require_root
   fi
 
-  require_root
+  if [ "$adapter_type" != "stub" ] && [ "$install_mode" != "panel-only" ]; then
+    check_and_install_core_if_needed "$adapter_type" "$client_service" "$install_mode"
+    client_bin="$(find_client_binary "$adapter_type" "$client_service")" || die "${client_service} binary was not found. Install it first, or rerun with VPNVIEW_CLIENT_BIN=/path/to/${client_service}, or use --mode panel-only"
+    preflight_core "$adapter_type" "$client_bin" "$install_mode"
+  fi
+
+  print_install_plan "$install_mode" "$adapter_type" "$adapter_type" "${adapter_type}-main" "$client_service" "$client_config_path" "$client_template_path" "$client_bin"
+  print_port_plan "$adapter_type"
+  if [ "$install_mode" = "dry-run" ]; then
+    ok "dry-run complete; no files were changed"
+    return 0
+  fi
+
   require_command install
   require_command mktemp
 
@@ -1616,20 +1814,12 @@ main() {
     verify_systemd_units ""
     systemd_start ""
   elif [ "$adapter_type" != "stub" ]; then
-    local configured_path
-    config_key="$(adapter_config_key "$adapter_type")"
-    configured_path="$(yaml_get "$CONFIG_FILE" "adapter.${config_key}" 2>/dev/null || true)"
-    client_service="$(client_service_name "$adapter_type")"
-    client_config_path="$(locate_client_config "$adapter_type" "$client_service" "$configured_path")"
-    client_template_path="$(template_file_for_adapter "$adapter_type")"
     local client_config_dir
     client_config_dir="$(dirname "$client_config_path")"
     if [ ! -d "$client_config_dir" ]; then
       record_manifest_dir "$client_config_dir"
     fi
     mkdir -p "$client_config_dir"
-    client_bin="$(find_client_binary "$adapter_type" "$client_service")" || die "${client_service} binary was not found. Install it first, or rerun with VPNVIEW_CLIENT_BIN=/path/to/${client_service}, or use --mode panel-only"
-    preflight_core "$adapter_type" "$client_bin" "$install_mode"
     generate_template_from_client_config "$adapter_type" "$client_config_path" "$client_template_path"
     patch_config "$adapter_type" "$client_template_path" "$config_key" "$client_config_path" "$CONFIG_CREATED"
     local staging_config_path="${client_config_path}.vpnview.new"

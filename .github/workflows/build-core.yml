@@ -1,0 +1,140 @@
+name: Build sing-box Compatible Core
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-core:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout VPNView
+        uses: actions/checkout@692973e3d937129bcbf40652eb9f2f61becf3332 # v4.1.7
+        with:
+          path: vpnview-repo
+
+      - name: Checkout SagerNet/sing-box
+        uses: actions/checkout@692973e3d937129bcbf40652eb9f2f61becf3332 # v4.1.7
+        with:
+          repository: SagerNet/sing-box
+          ref: 085f60337799afc906069b540a38368968c123e4 # v1.9.3 tag commit
+          path: sing-box-src
+
+      - name: Set up Go
+        uses: actions/setup-go@0a12ed9d6a96ab950c8f026ed9f722fe0da7ef32 # v5.0.2
+        with:
+          go-version: '1.22'
+          cache: true
+
+      - name: Build linux/amd64 compatible core
+        run: |
+          cd sing-box-src
+          GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -v \
+            -tags with_gvisor,with_quic,with_dhcp,with_wireguard,with_utls,with_reality_server,with_acme,with_clash_api,with_v2ray_api \
+            -o ../vpnview-core-linux-amd64 ./cmd/sing-box
+
+      - name: Build linux/arm64 compatible core
+        run: |
+          cd sing-box-src
+          GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -v \
+            -tags with_gvisor,with_quic,with_dhcp,with_wireguard,with_utls,with_reality_server,with_acme,with_clash_api,with_v2ray_api \
+            -o ../vpnview-core-linux-arm64 ./cmd/sing-box
+
+      - name: Validate compatible core config preflight
+        run: |
+          cat > tmp_check.json <<'EOF'
+          {
+            "log": {"level": "error"},
+            "experimental": {
+              "v2ray_api": {
+                "listen": "127.0.0.1:10085",
+                "stats": {"enabled": true}
+              }
+            },
+            "inbounds": [
+              {
+                "type": "shadowsocks",
+                "tag": "vpnview-preflight-ss",
+                "listen": "127.0.0.1",
+                "listen_port": 18080,
+                "method": "2022-blake3-aes-128-gcm",
+                "password": "cGFzc3dvcmQxMjM0NTY3OA=="
+              }
+            ],
+            "outbounds": [
+              {"type": "direct", "tag": "direct"}
+            ]
+          }
+          EOF
+          chmod +x ./vpnview-core-linux-amd64
+          ./vpnview-core-linux-amd64 version
+          ./vpnview-core-linux-amd64 check -c tmp_check.json
+          echo "[OK] Preflight validation passed!"
+
+      - name: Package corresponding source code
+        run: |
+          tar -czf sing-box-corresponding-source-v1.9.3-085f603.tar.gz -C sing-box-src .
+
+      - name: Generate BUILDINFO-sing-box.txt
+        run: |
+          cat > BUILDINFO-sing-box.txt <<EOF
+          Upstream project: SagerNet/sing-box
+          Upstream version: v1.9.3
+          Exact upstream commit: 085f60337799afc906069b540a38368968c123e4
+          Build date: $(date -u +'%Y-%m-%dT%H:%M:%SZ')
+          Go version: 1.22
+          GOOS: linux
+          GOARCH: amd64 / arm64 (multi-arch build)
+          CGO_ENABLED: 0
+          Build tags: with_gvisor,with_quic,with_dhcp,with_wireguard,with_utls,with_reality_server,with_acme,with_clash_api,with_v2ray_api
+          Build command: GOOS=linux GOARCH=<arch> CGO_ENABLED=0 go build -v -tags with_gvisor,with_quic,with_dhcp,with_wireguard,with_utls,with_reality_server,with_acme,with_clash_api,with_v2ray_api -o vpnview-core-linux-<arch> ./cmd/sing-box
+          Source modifications: none
+          Applied patches: none
+          GitHub Actions run URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          EOF
+
+      - name: Generate Checksums
+        run: |
+          sha256sum vpnview-core-linux-amd64 vpnview-core-linux-arm64 sing-box-corresponding-source-v1.9.3-085f603.tar.gz BUILDINFO-sing-box.txt > SHA256SUMS
+
+      - name: Copy Licenses and Notices
+        run: |
+          cp vpnview-repo/LICENSE ./LICENSE-VPNView
+          cp vpnview-repo/THIRD_PARTY_NOTICES.md ./THIRD_PARTY_NOTICES.md
+
+      - name: Release Assets
+        uses: softprops/action-gh-release@c062e0eec596a5d7c013b247507bb5865ade4762 # v2.0.1
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          files: |
+            vpnview-core-linux-amd64
+            vpnview-core-linux-arm64
+            sing-box-corresponding-source-v1.9.3-085f603.tar.gz
+            BUILDINFO-sing-box.txt
+            SHA256SUMS
+            LICENSE-VPNView
+            THIRD_PARTY_NOTICES.md
+          body: |
+            ## VPNView Unofficial Compatible Core Release
+            
+            This release contains the unofficial compatible builds of SagerNet/sing-box for VPNView integration.
+            
+            ### Unofficial Compatible Build Disclaimer
+            This is an unofficial compatibility build compiled from SagerNet/sing-box with the `with_v2ray_api` build tag for VPNView integration. It is not an official SagerNet release and is not affiliated with, endorsed by, or supported by SagerNet.
+            
+            这是基于 SagerNet/sing-box 源码、启用 with_v2ray_api 编译标签生成的 VPNView 非官方兼容构建。本构建并非 SagerNet 官方发行版，也不代表获得 SagerNet 的关联、认可或支持。
+            
+            ### Licencing Information
+            - VPNView code is licensed under `GPL-3.0-or-later`.
+            - Third-party components and dependency licensing are documented in `THIRD_PARTY_NOTICES.md`.
+            - sing-box code is licensed under `GPL-3.0-or-later`.
+            
+            ### Integrity Check
+            Please verify the files using the `SHA256SUMS` file.
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
